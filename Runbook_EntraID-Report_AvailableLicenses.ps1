@@ -1,30 +1,32 @@
 <#
 .SYNOPSIS
-Microsoft 365 license availability report using Microsoft Graph API.
+Generates a Microsoft 365 license availability report using Microsoft Graph API.
 
 .DESCRIPTION
-This PowerShell script retrieves consumed and available license information 
-from a Microsoft 365 tenant via Microsoft Graph API, authenticating with an App Registration (client credentials).
+This PowerShell script connects to Microsoft Graph using an app registration with client credentials,
+retrieves license consumption and availability details from a Microsoft 365 tenant, and generates an HTML report.
+The report includes license names and available quantities, formatted for easy reading and email delivery.
+It automatically adjusts the report timestamp to Spain's timezone, accounting for daylight savings.
 
-It generates an HTML report showing licenses and their available quantities, formatted for email.
-The report can be sent either as HTML in the email body only, or also as an HTML attachment.
+The report highlights any negative license availability with a red background in the attached HTML file for quick identification.
 
-The report date/time automatically adjusts to Spain timezone, considering daylight savings.
+.PARAMETER Configurable variables
+- useAttachment (0|1): Whether to send the report as an HTML attachment (1) or only embed it in the email body (0).
+- recipients: List of email addresses to receive the report.
+- client1LogoUrl: URL of the logo displayed at the top of the report.
+- client2LogoUrl: URL of the logo displayed at the bottom of the report.
+- GraphClientId, GraphTenantId, GraphSecret: App registration credentials retrieved from Automation Account variables.
+- Correo_No-Reply: SMTP credential used as the sender email account.
 
-In the attached report, rows with negative license values are highlighted with a red background as a warning.
+.API Permissions Needed as Application
+- Directory.Read.All (to read license details)
+- Mail.Send (to send email via Microsoft Graph)
 
-.PARAMETER Main configurable variables
-- $useAttachment (0|1): controls whether the report is sent as an attachment (1) or only in the email body (0).
-
-.REQUIREMENTS
-- Automation Account variables:
-    * GraphClientId, GraphTenantId, GraphSecret: for Microsoft Graph authentication.
-    * Correo_No-Reply: SMTP credential (email sender user).
-- App Registration permissions for Microsoft Graph: license read access.
-- Microsoft Graph API access.
-
-.USAGE
-This script is intended to be run as an Azure Automation Runbook.
+.NOTES
+- Intended to run as an Azure Automation Runbook.
+- Filters out unwanted SKUs such as trials and free licenses.
+- Automatically sorts licenses alphabetically.
+- Adjusts date/time to "Romance Standard Time" (Spain) timezone.
 #>
 
 # Configuration variables
