@@ -1,14 +1,32 @@
-# Runbooks PowerShell - Informes en HTML/XLS
+# PowerShell Runbooks – HTML & XLS Reports
 
-Este repositorio contiene scripts desarrollados en **PowerShell Runtime 7.2**, diseñados para ser utilizados como **Runbooks** automatizados. El objetivo principal de estos scripts es la **generación de informes** y la **creación de archivos en formatos HTML y XLS** (Excel), facilitando así tareas de monitoreo, auditoría y reportes operativos.
+Welcome to this repository of **PowerShell Runbooks** built on **PowerShell Runtime 7.2**. These scripts are designed as **automated runbooks** to streamline and simplify report generation and data export tasks for IT administrators and support teams.
 
-## Características
+---
 
-- Compatibilidad con **PowerShell 7.2 (Runtime)**.
-- Generación de **informes en HTML** con estilos legibles y listos para presentación.
-- Exportación de datos a **archivos XLS** (formato Excel legible por herramientas como Excel, LibreOffice, etc.).
-- Scripts reutilizables y orientados a tareas comunes en entornos de administración y soporte.
-- Ideal para automatización a través de sistemas como Azure Automation, tareas programadas o CI/CD.
+## Overview
 
-## Estructura del Repositorio
+This collection focuses on generating **detailed reports** and exporting data in **HTML** and **XLS (Excel)** formats, enabling effective monitoring, auditing, and operational reporting.
 
+---
+
+## Features
+
+- **PowerShell 7.2 Runtime Compatible:** Scripts are built to leverage the latest PowerShell capabilities.  
+- **Rich HTML Reports:** Generates clean, styled, and presentation-ready HTML reports.  
+- **XLS Export:** Easily export data to XLS format compatible with Microsoft Excel, LibreOffice, and other spreadsheet tools.  
+- **Reusable & Modular:** Scripts are crafted for common administrative and operational scenarios, ensuring reusability and easy integration.  
+- **Automation Ready:** Ideal for running as automated runbooks within Azure Automation, scheduled tasks, or CI/CD pipelines.
+
+---
+
+## Use Cases
+
+- Automated monitoring reports  
+- Compliance and audit data exports  
+- Operational dashboards and summaries  
+- Integration with enterprise automation workflows
+
+---
+
+Feel free to explore, modify, and contribute to these scripts to suit your organizational needs!
