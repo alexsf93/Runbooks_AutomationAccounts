@@ -55,7 +55,7 @@ $graphClientSecret2 = Get-AutomationVariable -Name "GraphSecret2"
 
 $emailCredential = Get-AutomationPSCredential -Name "Correo_No-Reply"
 $emailUser = $emailCredential.UserName
-$recipients = @("alexsf93@gmail.com", "ejemplo@dominio.com")
+$recipients = @("example@domain.com", "example1@domain.com")
 
 $clientLogo = "https://staintunenaxvan.blob.core.windows.net/wallpapers/LOGO_NAXVAN_Mesa_de_trabajo_1_copia_2.png"
 
