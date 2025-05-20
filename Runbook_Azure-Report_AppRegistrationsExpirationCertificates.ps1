@@ -28,7 +28,7 @@ $smtpCredential = Get-AutomationPSCredential -Name "Correo_No-Reply"
 $smtpUser       = $smtpCredential.UserName
 
 # Recipient list
-$recipients = @("alexsf93@gmail.com", "example1@domain.com")
+$recipients = @("example1@domain.com", "example2@domain.com")
 
 $useAttachment = 0  # 1 = attachment + body, 0 = body only
 
