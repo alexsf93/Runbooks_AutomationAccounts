@@ -1,67 +1,59 @@
 <#
 .SYNOPSIS
-Azure Automation script to identify and block inactive member users in Azure AD, and send a detailed HTML report via email using Microsoft Graph API.
+This script blocks Azure AD member users who haven't logged in recently.
 
 .DESCRIPTION
-This script performs the following actions:
-- Retrieves all active "Member" type users from Azure AD using Microsoft Graph API.
-- Checks sign-in activity and detects users who have not signed in for a configurable number of days.
-- Blocks inactive users by setting `accountEnabled` to false.
-- Builds an HTML report listing affected users and their last sign-in date.
-- Sends the report to specified recipients via email, either embedded or as an attachment.
-- Optionally includes corporate logos in the report header and footer.
+Retrieves all active "Member" type users from Microsoft Entra ID. Excludes from processing:
+- Users with high privileges (e.g., Global Administrator)
+- Users explicitly listed in the `$excludedUsers` variable
+- Users with special characters (`#`) in their UserPrincipalName
+- Objects of type servicePrincipal
 
-.PARAMETER Configurable Variables (Azure Automation Variables):
-- GraphClientId           : Application (client) ID
-- GraphTenantId           : Tenant (directory) ID
-- GraphSecret             : Client secret
+It evaluates the last login date, and if it exceeds the threshold defined by `$inactivityDays`, the user will be blocked (if `$blockUsers = 1`) or simulated (if `$blockUsers = 0`).
 
-.PARAMETER Credential (Azure Automation Credential Asset):
-- Correo_No-Reply         : Credential for the email account used to send the report
+Generates an HTML report showing each processed user's status, indicating whether they were blocked, excluded, or simulated, and sends it via email to the defined recipients.
 
-.PARAMETER Other variables:
-- recipient               : List of email addresses to receive the report
-- ClientLogo1             : URL of the logo to display in the report header
-- ClientLogo2             : URL of the logo to display in the report footer
-- useAttachment           : 1 to send the report as an attachment, 0 to include it in the body only
-- inactivityDays          : Number of days without activity to consider a user inactive
+.CONFIGURATION PARAMETERS
+- GraphClientId: ID of the Azure AD registered application.
+- GraphTenantId: Azure AD tenant ID.
+- GraphSecret: Application secret.
+- Email: SMTP credentials for sending mail.
+- recipient: Email recipient list.
+- useAttachment: 1 to send HTML as attachment and inline; 0 to include it only inline.
+- inactivityDays: Number of days without activity to consider blocking.
+- blockUsers: 1 to block users, 0 to simulate only.
+- reportHighPrivilegeUsers: 1 to include high-privilege users in report, 0 to exclude entirely.
 
-.API Permissions Required:
-- Microsoft Graph API:
-  - User.Read.All
-  - AuditLog.Read.All
-  - User.EnableDisableAccount.All
-  - Mail.Send
-
-.NOTES
-- Time zone used: "Romance Standard Time" (Spain).
-- Can be scheduled as an Azure Automation Runbook.
-- Users whose UPN contains '#' are excluded from the analysis.
+.REQUIRED PERMISSIONS (as application)
+- User.Read.All
+- Directory.Read.All
+- AuditLog.Read.All
+- Mail.Send
+- User.EnableDisableAccount.All
 #>
 
 # Configurable variables
-$clientId     = Get-AutomationVariable -Name "GraphClientId"
-$tenantId     = Get-AutomationVariable -Name "GraphTenantId"
-$clientSecret = Get-AutomationVariable -Name "GraphSecret"
+$clientId            = Get-AutomationVariable -Name "GraphClientId"
+$tenantId            = Get-AutomationVariable -Name "GraphTenantId"
+$clientSecret        = Get-AutomationVariable -Name "GraphSecret"
+$smtpCredential      = Get-AutomationPSCredential -Name "Email"
+$smtpUser            = $smtpCredential.UserName
+$recipient           = @("example@domain.com", "example1@domain.com")
+$useAttachment       = 0
+$ClientLogo1         = "https://staintunenaxvan.blob.core.windows.net/wallpapers/LOGO_NAXVAN_Mesa_de_trabajo_1_copia_2.png"
+$ClientLogo2         = "https://staintunenaxvan.blob.core.windows.net/wallpapers/LOGO_NAXVAN_Mesa_de_trabajo_1_copia_2.png"
+$inactivityDays      = 30
+$blockUsers          = 1  # 1 = block users, 0 = simulate only
+$reportHighPrivilegeUsers = 0 # 1 = include high-privilege users in report, 0 = exclude them
+$cutoffDate          = (Get-Date).AddDays(-$inactivityDays)
 
-$smtpCredential = Get-AutomationPSCredential -Name "Correo_No-Reply"
-$smtpUser       = $smtpCredential.UserName
+# Static list of users to exclude from blocking and report (userPrincipalName)
+$excludedUsers = @(
+    "no-reply@karanai102.es",
+    "role@karanai102.es"
+)
 
-# Recipients
-$recipient = @("alexsf93@gmail.com", "example@domain.com")
-
-# Send report as attachment (1) or embed in email body (0)
-$useAttachment = 0
-
-# Logo URLs
-$ClientLogo1 = "https://staintunenaxvan.blob.core.windows.net/wallpapers/LOGO_NAXVAN_Mesa_de_trabajo_1_copia_2.png"
-$ClientLogo2 = "https://staintunenaxvan.blob.core.windows.net/wallpapers/LOGO_NAXVAN_Mesa_de_trabajo_1_copia_2.png"
-
-# Inactivity threshold (in days)
-$inactivityDays = 2
-$cutoffDate = (Get-Date).AddDays(-$inactivityDays)
-
-# Get Microsoft Graph token
+# Obtain Microsoft Graph token
 $tokenResponse = Invoke-RestMethod -Method Post -Uri "https://login.microsoftonline.com/$tenantId/oauth2/v2.0/token" -Body @{
     client_id     = $clientId
     scope         = "https://graph.microsoft.com/.default"
@@ -71,7 +63,34 @@ $tokenResponse = Invoke-RestMethod -Method Post -Uri "https://login.microsoftonl
 $accessToken = $tokenResponse.access_token
 $headers = @{ Authorization = "Bearer $accessToken"; "ConsistencyLevel" = "eventual" }
 
-# Get all active Member users
+# Get active directory roles
+$uriDirectoryRoles = "https://graph.microsoft.com/v1.0/directoryRoles"
+$directoryRoles = Invoke-RestMethod -Uri $uriDirectoryRoles -Headers $headers -Method Get
+
+# High privilege roles to detect
+$highPrivilegeRoleNames = @(
+    "Global Administrator",
+    "Privileged Role Administrator",
+    "Security Administrator",
+    "Exchange Administrator",
+    "SharePoint Administrator",
+    "User Administrator"
+)
+
+# Filter active roles that are considered privileged
+$activeHighRoles = $directoryRoles.value | Where-Object { $highPrivilegeRoleNames -contains $_.displayName }
+
+# Get users with high privilege roles
+$privilegedUsers = @{}
+foreach ($role in $activeHighRoles) {
+    $roleMembersUri = "https://graph.microsoft.com/v1.0/directoryRoles/$($role.id)/members?`$select=id,userPrincipalName"
+    $membersResponse = Invoke-RestMethod -Uri $roleMembersUri -Headers $headers -Method Get
+    foreach ($member in $membersResponse.value) {
+        $privilegedUsers[$member.id] = $member.userPrincipalName
+    }
+}
+
+# Get active Member-type users
 $uriUsers = "https://graph.microsoft.com/v1.0/users?`$filter=userType eq 'Member' and accountEnabled eq true&`$select=id,displayName,userPrincipalName,accountEnabled&`$top=999"
 $users = @()
 do {
@@ -80,121 +99,123 @@ do {
     $uriUsers = $response.'@odata.nextLink'
 } while ($uriUsers)
 
-# Filter users
-$inactiveUsers = @()
+# Get service principals to exclude them
+$servicePrincipals = @()
+$uriSP = "https://graph.microsoft.com/v1.0/servicePrincipals?`$select=id"
+do {
+    $spResponse = Invoke-RestMethod -Method Get -Uri $uriSP -Headers $headers
+    $servicePrincipals += $spResponse.value
+    $uriSP = $spResponse.'@odata.nextLink'
+} while ($uriSP)
 
+# Process users
+$processedUsers = @()
 foreach ($user in $users) {
+    # Exclude special users
     if ($user.userPrincipalName -like "*#*") { continue }
+    if ($servicePrincipals | Where-Object { $_.id -eq $user.id }) { continue }
+    if ($excludedUsers -contains $user.userPrincipalName) { continue }
 
-    $uriSignIns = "https://graph.microsoft.com/v1.0/auditLogs/signIns?`$filter=userId eq '$($user.id)'&`$orderby=createdDateTime desc&`$top=50"
+    # Get last sign-in
+    $uriSignIns = "https://graph.microsoft.com/v1.0/auditLogs/signIns?`$filter=userId eq '$($user.id)'&`$orderby=createdDateTime desc&`$top=1"
     try {
-        $signIns = Invoke-RestMethod -Method Get -Uri $uriSignIns -Headers $headers -ErrorAction Stop
-        $successfulSignIns = $signIns.value | Where-Object { $_.status.errorCode -eq 0 }
+        $signIns = Invoke-RestMethod -Method Get -Uri $uriSignIns -Headers $headers
+        if ($signIns.value.Count -eq 0) { continue }
+        $lastSignIn = [datetime]$signIns.value[0].createdDateTime
 
-        if ($successfulSignIns.Count -gt 0) {
-            $lastSignIn = ($successfulSignIns | Select-Object -First 1).createdDateTime
-            if ([datetime]$lastSignIn -lt $cutoffDate) {
-                $inactiveUsers += [PSCustomObject]@{
-                    Id               = $user.id
-                    DisplayName      = $user.displayName
-                    UserPrincipalName= $user.userPrincipalName
-                    LastSignIn       = [datetime]$lastSignIn
-                    AccountEnabled   = $user.accountEnabled
+        if ($lastSignIn -lt $cutoffDate) {
+            # High-privilege user
+            if ($privilegedUsers.ContainsKey($user.id)) {
+                if ($reportHighPrivilegeUsers -eq 1) {
+                    $status = "User not blocked, high privileges"
+                    $processedUsers += [PSCustomObject]@{
+                        Id                = $user.id
+                        DisplayName       = $user.displayName
+                        UserPrincipalName = $user.userPrincipalName
+                        LastSignIn        = $lastSignIn
+                        Status            = $status
+                    }
+                }
+                # If reportHighPrivilegeUsers = 0, skip entirely
+            }
+            else {
+                # User without high privileges
+                if ($blockUsers -eq 1) {
+                    # Block user
+                    $patchBody = @{ accountEnabled = $false } | ConvertTo-Json
+                    Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/users/$($user.id)" -Headers $headers -Method PATCH -Body $patchBody -ContentType "application/json"
+                    $blockStatus = "User has been blocked"
+                } else {
+                    $blockStatus = "Simulation: user not blocked"
+                }
+                $processedUsers += [PSCustomObject]@{
+                    Id                = $user.id
+                    DisplayName       = $user.displayName
+                    UserPrincipalName = $user.userPrincipalName
+                    LastSignIn        = $lastSignIn
+                    Status            = $blockStatus
                 }
             }
         }
     } catch {
-        # Ignore errors on sign-in query
+        Write-Output "Error processing user $($user.userPrincipalName): $_"
     }
 }
 
-# Block users and update state
-foreach ($u in $inactiveUsers) {
-    if ($u.AccountEnabled) {
-        $patchBody = @{ accountEnabled = $false } | ConvertTo-Json
-        try {
-            Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/users/$($u.Id)" -Headers $headers -Method PATCH -Body $patchBody -ContentType "application/json"
-            $u.AccountEnabled = $true  # Was active and has now been blocked
-        } catch {
-            $u.AccountEnabled = $true
-        }
-    } else {
-        $u.AccountEnabled = $false  # Already blocked
-    }
-}
-
-# Get current time in Spain
+# Report generation timestamp
 $timestamp = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId((Get-Date), "Romance Standard Time").ToString("dd/MM/yyyy HH:mm")
 
-# Build HTML table
-if ($inactiveUsers.Count -eq 0) {
-    $htmlTable = @"
+# Build HTML report
+$htmlTable = @"
 <table border='2' cellpadding='6' cellspacing='0' style='border-collapse: collapse; font-family: Arial; border-color:#000000; width: 100%;'>
-<tr><td colspan='4' style='border: 2px solid #000000; text-align:center;'>
-    <img src='$ClientLogo1' alt='Client Logo' style='width:200px; height:50px; margin: 10px auto; display:block;'/>
+<tr><td colspan='4' style='text-align:center; border: 2px solid #000000;'>
+    <img src='$ClientLogo2' style='width:200px; height:50px;'/>
 </td></tr>
 <tr><td colspan='4' style='text-align:center; border: 2px solid #000000; font-weight:bold; font-size:18px;'>
-    Inactive and Blocked Member Users Report
-    <br/><span style='font-size:12px;'>Report generated: $timestamp</span>
-</td></tr>
-<tr><td colspan='4' style='text-align:center; border: 2px solid #000000;'>No inactive users found (more than $inactivityDays days without login).</td></tr>
-<tr><td colspan='4' style='border: 2px solid #000000; text-align:center;'>
-    <img src='$ClientLogo2' alt='Client Logo' style='width:200px; height:50px; margin: 10px auto; display:block;'/>
-</td></tr>
-</table>
+    Inactive and Blocked Users Report<br/>
+    <span style='font-size:12px;'>Generated: $timestamp</span><br/>
 "@
-} else {
-    $htmlTable = @"
-<table border='2' cellpadding='6' cellspacing='0' style='border-collapse: collapse; font-family: Arial; border-color:#000000; width: 100%;'>
-<tr><td colspan='4' style='border: 2px solid #000000; text-align:center;'>
-    <img src='$ClientLogo1' alt='Client Logo' style='width:200px; height:50px; margin: 10px auto; display:block;'/>
-</td></tr>
-<tr><td colspan='4' style='text-align:center; border: 2px solid #000000; font-weight:bold; font-size:18px;'>
-    Inactive and Blocked Member Users Report
-    <br/><span style='font-size:12px;'>Report generated: $timestamp</span>
-</td></tr>
-<tr style='text-align:center; font-weight:bold; background-color:#f0f0f0;'>
-    <th style='border: 1px solid #000000;'>Display Name</th>
-    <th style='border: 1px solid #000000;'>User Principal Name</th>
-    <th style='border: 1px solid #000000;'>Last Sign-In</th>
-    <th style='border: 1px solid #000000;'>New Status</th>
-</tr>
-"@
-    foreach ($u in $inactiveUsers) {
-        $dateStr = $u.LastSignIn.ToString("dd/MM/yyyy HH:mm")
-        $newStatus = if ($u.AccountEnabled) { "Blocked now" } else { "Already blocked" }
-        $htmlTable += "<tr style='text-align:center;'>" +
-            "<td style='border: 1px solid #000000;'>$($u.DisplayName)</td>" +
-            "<td style='border: 1px solid #000000;'>$($u.UserPrincipalName)</td>" +
-            "<td style='border: 1px solid #000000;'>$dateStr</td>" +
-            "<td style='border: 1px solid #000000;'>$newStatus</td>" +
-            "</tr>"
-    }
-    $htmlTable += "<tr><td colspan='4' style='border: 2px solid #000000; text-align:center;'>
-        <img src='$ClientLogo2' alt='Client Logo' style='width:200px; height:50px; margin: 10px auto; display:block;'/>
-    </td></tr>"
-    $htmlTable += "</table>"
+
+if ($blockUsers -eq 0) {
+    $htmlTable += "<span style='color:blue; font-weight:bold;'>This is a simulation report. No users have been blocked.</span><br/>"
 }
 
-# Prepare recipients
+$htmlTable += "</td></tr>"
+
+if ($processedUsers.Count -eq 0) {
+    $htmlTable += "<tr><td colspan='4' style='text-align:center;'>No inactive users found for blocking.</td></tr>"
+} else {
+    $htmlTable += "<tr style='text-align:center; font-weight:bold; background-color:#f0f0f0;'>
+        <th>DisplayName</th><th>UserPrincipalName</th><th>Last Sign-In</th><th>Status</th></tr>"
+    foreach ($u in $processedUsers) {
+        $dateStr = if ($u.LastSignIn -is [datetime]) { $u.LastSignIn.ToString("dd/MM/yyyy HH:mm") } else { $u.LastSignIn }
+        $htmlTable += "<tr style='text-align:center;'>
+            <td>$($u.DisplayName)</td>
+            <td>$($u.UserPrincipalName)</td>
+            <td>$dateStr</td>
+            <td>$($u.Status)</td>
+        </tr>"
+    }
+}
+
+$htmlTable += "<tr><td colspan='4' style='text-align:center; border: 2px solid #000000;'>
+    <img src='$ClientLogo1' style='width:200px; height:50px;'/>
+</td></tr></table>"
+
+# Prepare email
 $toRecipientsArray = @()
 foreach ($mail in $recipient) {
     $toRecipientsArray += @{ emailAddress = @{ address = $mail } }
 }
 
-# Build email payload
-$subject = "Azure Report - Inactive and Blocked Member Users"
+$subject = if ($blockUsers -eq 1) { "Azure Report - Inactive Users Blocked" } else { "Azure Report - User Blocking Simulation" }
 
 if ($useAttachment -eq 1) {
     $htmlBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($htmlTable))
-
     $emailPayload = @{
         message = @{
             subject = $subject
-            body = @{
-                contentType = "HTML"
-                content     = $htmlTable
-            }
+            body = @{ contentType = "HTML"; content = $htmlTable }
             toRecipients = $toRecipientsArray
             attachments = @(@{
                 '@odata.type' = "#microsoft.graph.fileAttachment"
@@ -209,10 +230,7 @@ if ($useAttachment -eq 1) {
     $emailPayload = @{
         message = @{
             subject = $subject
-            body = @{
-                contentType = "HTML"
-                content     = $htmlTable
-            }
+            body = @{ contentType = "HTML"; content = $htmlTable }
             toRecipients = $toRecipientsArray
         }
         saveToSentItems = $false
