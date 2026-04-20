@@ -23,7 +23,7 @@
     Start-AutomationRunbook -Name "Runbook_Sharepoint-Report_LargerThan500MB"
 
 .NOTES
-    Author: Automated System
+    Author: Alejandro Suárez @alexsf93
     Version: 1.0
     Prerequisites: Sites.Read.All, Mail.Send
 #>

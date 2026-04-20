@@ -24,7 +24,7 @@
     Start-AutomationRunbook -Name "Runbook_Azure-Report_AppRegistrationsExpirationSecrets"
 
 .NOTES
-    Author: Automated System
+    Author: Alejandro Suárez @alexsf93
     Version: 1.0
     Prerequisites: Application.Read.All, Mail.Send
 #>

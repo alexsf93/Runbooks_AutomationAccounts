@@ -23,7 +23,7 @@
     Start-AutomationRunbook -Name "Runbook_EntraID-Report_MFA_Enabled_Disabled"
 
 .NOTES
-    Author: Automated System
+    Author: Alejandro Suárez @alexsf93
     Version: 1.0
     Prerequisites: AuthenticationMethod.Read.All, Mail.Send
 #>

@@ -25,7 +25,7 @@
     Start-AutomationRunbook -Name "Runbook_EntraID-Report_DisableUsersInactivty"
 
 .NOTES
-    Author: Automated System
+    Author: Alejandro Suárez @alexsf93
     Version: 1.0
     Prerequisites: User.Read.All, Directory.Read.All, AuditLog.Read.All, Mail.Send, User.EnableDisableAccount.All
 #>

@@ -24,7 +24,7 @@
     Start-AutomationRunbook -Name "Runbook_Intune-Report_NonCompliantDevices"
 
 .NOTES
-    Author: Automated System
+    Author: Alejandro Suárez @alexsf93
     Version: 1.0
     Prerequisites: DeviceManagementManagedDevices.Read.All, Mail.Send
 #>

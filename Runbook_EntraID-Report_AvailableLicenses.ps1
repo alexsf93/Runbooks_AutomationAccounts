@@ -23,7 +23,7 @@
     Start-AutomationRunbook -Name "Runbook_EntraID-Report_AvailableLicenses"
 
 .NOTES
-    Author: Automated System
+    Author: Alejandro Suárez @alexsf93
     Version: 1.0
     Prerequisites: Directory.Read.All, Mail.Send
 #>

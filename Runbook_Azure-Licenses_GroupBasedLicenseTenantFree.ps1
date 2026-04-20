@@ -20,7 +20,7 @@
     Start-AutomationRunbook -Name "Runbook_Azure-Licenses_GroupBasedLicenseTenantFree"
 
 .NOTES
-    Author: Automated System
+    Author: Alejandro Suárez @alexsf93
     Version: 1.0
     Prerequisites: User.Read.All, Directory.ReadWrite.All
 #>
