@@ -28,188 +28,164 @@
  
 .NOTES
     Author:      Alejandro Suarez
-    Date:        2026-05-20
-    Version:     1.4 (Full English Translation - Production Ready)
+    Date:        2026-05-21
+    Version:     1.5
 #>
  
 [CmdletBinding()]
 param (
-    [Parameter(Mandatory=$false, HelpMessage="Name of the Resource Group")]
+    [Parameter(Mandatory=$false)]
     [string]$ResourceGroupName,
  
-    [Parameter(Mandatory=$false, HelpMessage="Name of the SQL Server")]
+    [Parameter(Mandatory=$false)]
     [string]$ServerName,
  
-    [Parameter(Mandatory=$false, HelpMessage="Name of the SQL Database")]
+    [Parameter(Mandatory=$false)]
     [string]$DatabaseName,
  
-    [Parameter(Mandatory=$false, HelpMessage="Action to perform: ScaleUp or ScaleDown")]
+    [Parameter(Mandatory=$false)]
     [string]$Action,
 
-    [Parameter(Mandatory=$false, HelpMessage="Automatically populated by Azure Alerts")]
+    [Parameter(Mandatory=$false)]
     [object]$WebhookData
 )
  
 $ErrorActionPreference = "Stop"
  
-# ---------------------------------------------------------------------------
-# Helper Functions
-# ---------------------------------------------------------------------------
 function Write-Log {
     param (
-        [Parameter(Mandatory=$true)]
-        [string]$Message,
-       
-        [Parameter(Mandatory=$false)]
-        [ValidateSet("INFO", "WARNING", "ERROR", "SUCCESS")]
-        [string]$Level = "INFO"
+        [Parameter(Mandatory=$true)][string]$Message,
+        [Parameter(Mandatory=$false)][ValidateSet("INFO", "WARNING", "ERROR", "SUCCESS")][string]$Level = "INFO"
     )
-   
     $timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ssZ")
-    $formattedMessage = "[$timestamp] [$Level] $Message"
-   
-    if ($Level -eq "ERROR") {
-        Write-Error $formattedMessage
-    } else {
-        Write-Output $formattedMessage
-    }
+    Write-Output "[$timestamp] [$Level] $Message"
 }
  
-# ---------------------------------------------------------------------------
-# Main Execution
-# ---------------------------------------------------------------------------
 try {
     Write-Log "Initializing AutoScale Runbook..." "INFO"
  
-    # Validation: Check if triggered by an Azure Monitor Alert via Action Group
+    # Process inputs if triggered via webhook (Azure Monitor)
     if ($null -ne $WebhookData) {
-        Write-Log "Runbook triggered by Azure Monitor Alert via Action Group. Parsing parameters..." "INFO"
+        Write-Log "Runbook triggered by Azure Monitor Webhook. Analyzing data structure..." "INFO"
         
-        # 1. Attempt to extract from WebhookProperties (Static values from real alert)
-        if ($null -ne $WebhookData.WebhookProperties -and $null -ne $WebhookData.WebhookProperties.Action) {
-            $ResourceGroupName = $WebhookData.WebhookProperties.ResourceGroupName
-            $ServerName        = $WebhookData.WebhookProperties.ServerName
-            $DatabaseName      = $WebhookData.WebhookProperties.DatabaseName
-            $Action            = $WebhookData.WebhookProperties.Action
-            Write-Log "Parameters successfully extracted from WebhookProperties." "SUCCESS"
-        } 
-        # 2. If it is a test execution or properties are empty, attempt to parse RequestBody safely
+        $AlertContext = $null
+        
+        # Check if Common Alert Schema is directly on the root object
+        if ($null -ne $WebhookData.schemaId -and $WebhookData.schemaId -eq "azureMonitorCommonAlertSchema") {
+            $AlertContext = $WebhookData
+            Write-Log "Common Alert Schema detected at Webhook root." "INFO"
+        }
+        # Fallback to RequestBody if serialized
         elseif ($null -ne $WebhookData.RequestBody) {
-            Write-Log "WebhookProperties is empty or incomplete. Attempting to extract data from alert body..." "WARNING"
             $AlertContext = ConvertFrom-Json $WebhookData.RequestBody
+            Write-Log "Common Alert Schema extracted from RequestBody." "INFO"
+        }
+        
+        # Extract resource data and operation from alert payload
+        if ($null -ne $AlertContext -and $null -ne $AlertContext.data -and $null -ne $AlertContext.data.essentials) {
+            $Essentials = $AlertContext.data.essentials
             
-            # Safe verification of Common Alert Schema structure
-            if ($null -ne $AlertContext.data -and $null -ne $AlertContext.data.essentials -and $null -ne $AlertContext.data.essentials.alertTargetIds) {
-                $ResourceID = $AlertContext.data.essentials.alertTargetIds[0]
+            # Extract target database details from resource ID
+            if ($null -ne $Essentials.alertTargetIDs -and $Essentials.alertTargetIDs.Count -gt 0) {
+                $ResourceID = $Essentials.alertTargetIDs[0]
+                Write-Log "Analyzing alert target resource ID: $ResourceID" "INFO"
+                
                 if ($ResourceID -match "resourceGroups/(?<rg>[^/]+)/providers/Microsoft.Sql/servers/(?<server>[^/]+)/databases/(?<db>[^/]+)") {
                     $ResourceGroupName = $Matches['rg']
                     $ServerName        = $Matches['server']
                     $DatabaseName      = $Matches['db']
-                    Write-Log "Target resources dynamically extracted from Common Alert Schema." "INFO"
+                    Write-Log "Resources automatically detected -> RG: '$ResourceGroupName', Server: '$ServerName', DB: '$DatabaseName'" "SUCCESS"
                 }
+            }
+            
+            # Determine scale direction from alert rule name
+            if ($null -ne $Essentials.alertRule) {
+                $RuleName = $Essentials.alertRule
+                if ($RuleName -match "scaleup") {
+                    $Action = "ScaleUp"
+                } elseif ($RuleName -match "scaledown") {
+                    $Action = "ScaleDown"
+                }
+                Write-Log "Action determined via alert rule name ($RuleName) -> '$Action'" "SUCCESS"
             }
         }
     }
 
-    # Specific control handle for Azure's "Test action group" button
-    if ($null -ne $WebhookData -and [string]::IsNullOrEmpty($Action)) {
-        Write-Log "ATTENTION: Test execution detected (Test Action Group). Forcing dummy parameters to validate workflow." "WARNING"
-        $ResourceGroupName = if ([string]::IsNullOrEmpty($ResourceGroupName)) { "test-rg" } else { $ResourceGroupName }
-        $ServerName        = if ([string]::IsNullOrEmpty($ServerName)) { "test-server" } else { $ServerName }
-        $DatabaseName      = if ([string]::IsNullOrEmpty($DatabaseName)) { "test-db" } else { $DatabaseName }
-        $Action            = "ScaleUp"
-    }
-
-    # Final safety check to ensure all required parameters are set
+    # Validate final parameters
     if ([string]::IsNullOrEmpty($ResourceGroupName) -or [string]::IsNullOrEmpty($ServerName) -or [string]::IsNullOrEmpty($DatabaseName) -or [string]::IsNullOrEmpty($Action)) {
-        throw "Missing required parameters. Current State -> RG: '$ResourceGroupName', Server: '$ServerName', DB: '$DatabaseName', Action: '$Action'"
+        throw "Missing required parameters. Evaluated State -> RG: '$ResourceGroupName', Server: '$ServerName', DB: '$DatabaseName', Action: '$Action'"
     }
 
-    # Trim spaces from input parameters
     $ResourceGroupName = $ResourceGroupName.Trim()
     $ServerName        = $ServerName.Trim()
     $DatabaseName      = $DatabaseName.Trim()
     $Action            = $Action.Trim()
  
-    # FQDN Correction: If ServerName contains ".database.windows.net", strip it to short name
+    # Strip FQDN suffix if present
     if ($ServerName -like "*.database.windows.net*") {
         $ServerName = $ServerName.Split('.')[0]
-        Write-Log "FQDN detected for SQL Server. Cleaned to short name: '$ServerName'" "INFO"
     }
 
-    Write-Log "Target Resource: $DatabaseName on server $ServerName ($Action)" "INFO"
+    Write-Log "PROCESSING REAL RESOURCE CHANGE: DB '$DatabaseName' | Server '$ServerName' | Action: '$Action'" "INFO"
  
-    # If a simulated test execution environment is detected, exit successfully without altering any real database
-    if ($ServerName -eq "test-server" -or $ResourceGroupName -eq "test-rg") {
-        Write-Log "Action Group Test completed successfully. Script workflow is correct." "SUCCESS"
-        return
-    }
-
+    # Connect to Azure
     Write-Log "Authenticating to Azure via System-Assigned Managed Identity..." "INFO"
     Disable-AzContextAutosave -Scope Process | Out-Null
     $AzureContext = (Connect-AzAccount -Identity).context
     Write-Log "Authentication successful. Subscription: $($AzureContext.Subscription.Name)" "SUCCESS"
  
+    # Get current DB scale info
     Write-Log "Retrieving current database configuration..." "INFO"
     $db = Get-AzSqlDatabase -ResourceGroupName $ResourceGroupName -ServerName $ServerName -DatabaseName $DatabaseName
- 
-    # Robust capacity detection (handles version differences across Az.Sql module)
     $currentCapacity = $db.Capacity
    
     if ([string]::IsNullOrEmpty($currentCapacity)) {
-        if ($null -ne $db.Sku -and $null -ne $db.Sku.Capacity) {
-            $currentCapacity = $db.Sku.Capacity
-        } elseif ($db.CurrentServiceObjectiveName -match "_(\d+)$") {
-            $currentCapacity = [int]$matches[1]
-        } else {
-            Write-Log "Could not determine exact vCore capacity. Defaulting to 0 to force evaluation." "WARNING"
-            $currentCapacity = 0
-        }
+        if ($null -ne $db.Sku -and $null -ne $db.Sku.Capacity) { $currentCapacity = $db.Sku.Capacity }
+        elseif ($db.CurrentServiceObjectiveName -match "_(\d+)$") { $currentCapacity = [int]$matches[1] }
+        else { $currentCapacity = 0 }
     }
  
-    Write-Log "Current Capacity: $currentCapacity vCores." "INFO"
+    Write-Log "Current detected capacity: $currentCapacity vCores." "INFO"
  
-    # Define Scale Limits & Increments
+    # Scaling thresholds
     $MaxVcores  = 6
     $MinVcores  = 4
     $StepVcores = 2
  
-    # Execute Scaling Logic
+    # Execute scaling logic
     if ($Action -eq "ScaleUp") {
         if ($currentCapacity -lt $MaxVcores) {
-            # Calculate next tier and ensure max limit is not exceeded
             $targetCapacity = $currentCapacity + $StepVcores
             if ($targetCapacity -gt $MaxVcores) { $targetCapacity = $MaxVcores }
  
-            Write-Log "High CPU threshold reached. Scaling up by $StepVcores (Target: $targetCapacity vCores)..." "WARNING"
+            Write-Log "High CPU threshold reached. Scaling up to $targetCapacity vCores..." "WARNING"
             Set-AzSqlDatabase -ResourceGroupName $ResourceGroupName -ServerName $ServerName -DatabaseName $DatabaseName -Capacity $targetCapacity | Out-Null
-            Write-Log "Successfully scaled up to $targetCapacity vCores." "SUCCESS"
+            Write-Log "Scale up completed successfully to $targetCapacity vCores." "SUCCESS"
         }
         else {
-            Write-Log "Database is already at $currentCapacity vCores (>= $MaxVcores). No scale-up required." "INFO"
+            Write-Log "Database is already at the maximum configured capacity ($currentCapacity vCores)." "INFO"
         }
     }
     elseif ($Action -eq "ScaleDown") {
         if ($currentCapacity -gt $MinVcores) {
-            # Calculate next tier and ensure min limit is not breached
             $targetCapacity = $currentCapacity - $StepVcores
             if ($targetCapacity -lt $MinVcores) { $targetCapacity = $MinVcores }
  
-            Write-Log "CPU usage normalized. Scaling down by $StepVcores (Target: $targetCapacity vCores)..." "INFO"
+            Write-Log "CPU usage normalized. Scaling down to $targetCapacity vCores..." "INFO"
             Set-AzSqlDatabase -ResourceGroupName $ResourceGroupName -ServerName $ServerName -DatabaseName $DatabaseName -Capacity $targetCapacity | Out-Null
-            Write-Log "Successfully scaled down to $targetCapacity vCores." "SUCCESS"
+            Write-Log "Scale down completed successfully to $targetCapacity vCores." "SUCCESS"
         }
         else {
-            Write-Log "Database is already at $currentCapacity vCores (<= $MinVcores). No scale-down required." "INFO"
+            Write-Log "Database is already at the minimum configured capacity ($currentCapacity vCores)." "INFO"
         }
     }
     else {
         throw "Invalid action value: '$Action'. Must be 'ScaleUp' or 'ScaleDown'."
     }
  
-    Write-Log "Runbook execution completed." "SUCCESS"
+    Write-Log "Runbook execution completed successfully." "SUCCESS"
 }
 catch {
-    Write-Log "An unexpected error occurred: $($_.Exception.Message)" "ERROR"
+    Write-Log "An unexpected error occurred during execution: $($_.Exception.Message)" "ERROR"
     throw
 }
