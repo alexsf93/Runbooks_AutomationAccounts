@@ -42,6 +42,9 @@
 .PARAMETER ForceWithDeviceEmails
     Lista de correos de usuarios (ej. CEOs) que se forzara a considerar con dispositivo.
 
+.PARAMETER ExceptedNamingPatternEmails
+    Lista de correos de usuarios exceptuados de cumplir con la validacion del patron de nombre.
+
 .REQUIREMENTS
     - Modulo Az.Accounts instalado en el Automation Account.
     - Managed Identity con los siguientes permisos de Microsoft Graph (Application):
@@ -84,7 +87,11 @@ param(
     [string[]]$ExcludedUserPatterns = @("admin", "test", "prueba", "poc"),
     [bool]$EnforceNamingPattern = $true,
     [bool]$RequireMail = $true,
-    [string[]]$ForceWithDeviceEmails = @("alejandro@naxvan.es", "alexsf93@naxvan.es")
+    [string[]]$ForceWithDeviceEmails = @("alejandro@naxvan.es", "alexsf93@naxvan.es"),
+    [string[]]$ExceptedNamingPatternEmails = @(
+        "Acerrato@naxvan.es",
+        "alejandro@naxvan.es"
+    )
 )
 
 $DryRun = -not $Commit
@@ -97,7 +104,8 @@ Write-Output "==================================================================
 if ($DryRun) {
     Write-Output " MODO: SIMULACION (Dry Run) - No se realizaran cambios en el tenant."
     Write-Output " Para aplicar los cambios reales, configure el parametro Commit a `$true."
-} else {
+}
+else {
     Write-Output " MODO: PRODUCCION (Commit) - Se aplicaran cambios reales en el tenant."
 }
 Write-Output "=========================================================================`n"
@@ -115,7 +123,8 @@ try {
         "Content-Type" = "application/json; charset=utf-8"
     }
     Write-Output "Autenticacion completada con exito.`n"
-} catch {
+}
+catch {
     Write-Error "Error de autenticacion con Microsoft Graph: $($_.Exception.Message)"
     exit 1
 }
@@ -144,17 +153,23 @@ function Invoke-GraphRest {
     
     try {
         return Invoke-RestMethod @Params
-    } catch {
+    }
+    catch {
         $msg = $_.Exception.Message
         $details = ""
-        if ($_.Exception -and $_.Exception.Response) {
+        if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+            $details = $_.ErrorDetails.Message
+        }
+        elseif ($_.Exception -and $_.Exception.Response) {
             try {
                 $stream = $_.Exception.Response.GetResponseStream()
                 if ($stream) {
                     $reader = [System.IO.StreamReader]::new($stream)
                     $details = $reader.ReadToEnd()
+                    $reader.Dispose()
                 }
-            } catch {}
+            }
+            catch {}
         }
         Write-Error "Error en REST Request ($Method $FullUri): $msg. Detalles: $details"
         throw $_
@@ -178,7 +193,8 @@ function Invoke-GraphPaginatedRequest {
             if ($response) {
                 $nextUri = $response.'@odata.nextLink'
             }
-        } catch {
+        }
+        catch {
             Write-Error "Error en la consulta Graph API ($nextUri): $($_.Exception.Message)"
             throw $_
         }
@@ -249,27 +265,42 @@ function Get-OrCreateGroup {
         if ($res.value -and $res.value.Count -gt 0) {
             $group = $res.value[0]
         }
-    } catch {
+    }
+    catch {
         Write-Warning "Error al buscar el grupo '$GroupName': $($_.Exception.Message)"
     }
 
     if ($group) {
+        $typesStr = if ($group.groupTypes) { $group.groupTypes -join ", " } else { "Ninguno" }
         Write-Host "Grupo '$GroupName' encontrado con ID: $($group.id)"
+        Write-Host "  - Tipo (groupTypes): $typesStr"
+        Write-Host "  - Habilitado para Mail (mailEnabled): $($group.mailEnabled)"
+        Write-Host "  - Seguridad (securityEnabled): $($group.securityEnabled)"
+        Write-Host "  - Sincronizado desde On-Premises (onPremisesSyncEnabled): $($group.onPremisesSyncEnabled)"
+        
+        # Validar si es un tipo de grupo soportado
+        if ($group.securityEnabled -ne $true -and ($group.groupTypes -notcontains "Unified")) {
+            Write-Warning "¡ATENCION! El grupo '$GroupName' no parece ser un grupo de seguridad estándar ni un grupo de Microsoft 365. Las consultas de miembros podrían fallar (404/400)."
+        }
+        if ($group.onPremisesSyncEnabled -eq $true) {
+            Write-Warning "¡ATENCION! El grupo '$GroupName' está sincronizado desde on-premises. Su membresía es de solo lectura en la nube."
+        }
         return $group.id
     }
 
     if ($DryRun) {
         Write-Host "[SIMULACION] El grupo '$GroupName' no existe. Se creara en el modo real."
         return "SIMULATION_GROUP_ID_$($GroupName -replace '[^a-zA-Z0-9]', '')"
-    } else {
+    }
+    else {
         Write-Host "El grupo '$GroupName' no existe. Creandolo..."
         $groupParams = @{
-            DisplayName = $GroupName
-            Description = $Description
-            MailEnabled = $false
-            MailNickname = ($GroupName -replace '[^a-zA-Z0-9]', '')
+            DisplayName     = $GroupName
+            Description     = $Description
+            MailEnabled     = $false
+            MailNickname    = ($GroupName -replace '[^a-zA-Z0-9]', '')
             SecurityEnabled = $true
-            GroupTypes = @()
+            GroupTypes      = @()
         }
         
         try {
@@ -277,7 +308,8 @@ function Get-OrCreateGroup {
             $newGroupJson = Invoke-GraphRest -Method POST -Uri "v1.0/groups" -Body $body
             Write-Host "Grupo creado con exito. ID: $($newGroupJson.id)"
             return $newGroupJson.id
-        } catch {
+        }
+        catch {
             Write-Error "No se pudo crear el grupo '$GroupName': $($_.Exception.Message)"
             throw $_
         }
@@ -295,7 +327,8 @@ $devices = @()
 try {
     $devices = Invoke-GraphPaginatedRequest -Uri "v1.0/deviceManagement/managedDevices?`$select=id,userId,userPrincipalName,operatingSystem"
     Write-Output "Se encontraron $($devices.Count) dispositivos registrados en Intune."
-} catch {
+}
+catch {
     Write-Error "Fallo critico al leer los dispositivos gestionados en Intune. Abortando."
     exit 1
 }
@@ -316,7 +349,8 @@ $allUsersRaw = @()
 try {
     $allUsersRaw = Invoke-GraphPaginatedRequest -Uri "v1.0/users?`$select=id,displayName,userPrincipalName,accountEnabled,userType,mail"
     Write-Output "Se encontraron $($allUsersRaw.Count) usuarios en el tenant."
-} catch {
+}
+catch {
     Write-Error "Fallo critico al leer los usuarios del tenant. Abortando."
     exit 1
 }
@@ -328,18 +362,20 @@ foreach ($u in $allUsersRaw) {
 }
 
 # Filtrar usuarios elegibles
-$eligibleUsers = $allUsersRaw | Where-Object {
-    $uid = $_.id
-    $upn = $_.userPrincipalName
-    $enabled = $_.accountEnabled
-    $uType = $_.userType
-    $mail = $_.mail
-    $displayName = $_.displayName
+$eligibleUsers = @()
+foreach ($u in $allUsersRaw) {
+    $uid = $u.id
+    $upn = $u.userPrincipalName
+    $enabled = $u.accountEnabled
+    $uType = $u.userType
+    $mail = $u.mail
+    $displayName = $u.displayName
     
     # Excepcion CEOs
     if ($ForceWithDeviceEmails -contains $upn) {
         Write-Output "DEBUG: Usuario '$upn' es forzado (CEO). Pasa filtro."
-        return $true
+        $eligibleUsers += $u
+        continue
     }
     
     if ($null -eq $enabled) { $enabled = $true }
@@ -348,9 +384,9 @@ $eligibleUsers = $allUsersRaw | Where-Object {
     $keep = $true
     $filterReason = ""
     
-    if ($ExcludeGuests -and $uType -ne "Member") { 
+    if ($ExcludeGuests -and ($uType -ne "Member" -or $upn -like "*#EXT#*")) { 
         $keep = $false 
-        $filterReason += " [No es Member, tipo=$uType]"
+        $filterReason += " [No es Member o es Invitado, tipo=$uType]"
     }
     if ($OnlyActiveUsers -and -not $enabled) { 
         $keep = $false 
@@ -377,7 +413,10 @@ $eligibleUsers = $allUsersRaw | Where-Object {
         }
     }
     if ($keep -and $EnforceNamingPattern) {
-        if (-not (Test-UserNamingPattern -UserPrincipalName $upn -DisplayName $displayName)) {
+        if ($ExceptedNamingPatternEmails -contains $upn) {
+            Write-Output "DEBUG: Usuario '$upn' es excepcion del patron de nombre. Pasa filtro."
+        }
+        elseif (-not (Test-UserNamingPattern -UserPrincipalName $upn -DisplayName $displayName)) {
             $keep = $false
             $filterReason += " [Fallo patron de nombre (UPN=$upn, DisplayName=$displayName)]"
         }
@@ -385,11 +424,11 @@ $eligibleUsers = $allUsersRaw | Where-Object {
     
     if (-not $keep) {
         Write-Output "DEBUG: Usuario '$upn' filtrado debido a:$filterReason"
-    } else {
-        Write-Output "DEBUG: Usuario '$upn' pasa el filtro."
     }
-    
-    $keep
+    else {
+        Write-Output "DEBUG: Usuario '$upn' pasa el filtro."
+        $eligibleUsers += $u
+    }
 }
 $exclusionesStr = if ($ExcludedUserPatterns) { $ExcludedUserPatterns -join ',' } else { "Ninguna" }
 Write-Output "Usuarios elegibles para evaluar tras filtros (Activos=$OnlyActiveUsers, ExcluirInvitados=$ExcludeGuests, Dominio=$AllowedDomain, Exclusiones=$exclusionesStr, ValidarPatronNombre=$EnforceNamingPattern, RequerirEmail=$RequireMail): $($eligibleUsers.Count)`n"
@@ -403,7 +442,8 @@ if ($groupWithId -notlike "SIMULATION_GROUP_ID_*") {
     try {
         $currentMembersWith = Invoke-GraphPaginatedRequest -Uri "v1.0/groups/$groupWithId/members?`$select=id,userPrincipalName,displayName"
         Write-Output "Miembros actuales en '$GroupNameWithDevices': $($currentMembersWith.Count)"
-    } catch {
+    }
+    catch {
         Write-Warning "No se pudo leer la membresia de '$GroupNameWithDevices'."
     }
 }
@@ -413,7 +453,8 @@ if ($groupWithoutId -notlike "SIMULATION_GROUP_ID_*") {
     try {
         $currentMembersWithout = Invoke-GraphPaginatedRequest -Uri "v1.0/groups/$groupWithoutId/members?`$select=id,userPrincipalName,displayName"
         Write-Output "Miembros actuales en '$GroupNameWithoutDevices': $($currentMembersWithout.Count)"
-    } catch {
+    }
+    catch {
         Write-Warning "No se pudo leer la membresia de '$GroupNameWithoutDevices'."
     }
 }
@@ -455,7 +496,8 @@ foreach ($u in $eligibleUsers) {
         if ($currentMembersWithoutIds.ContainsKey($uid)) {
             $toRemoveWithout += [PSCustomObject]@{ Id = $uid; UPN = $upn; DisplayName = $name; Reason = $reasonRemove }
         }
-    } else {
+    }
+    else {
         if (-not $currentMembersWithoutIds.ContainsKey($uid)) {
             $toAddWithout += [PSCustomObject]@{ Id = $uid; UPN = $upn; DisplayName = $name; Reason = "No tiene dispositivo en Intune" }
         }
@@ -485,7 +527,8 @@ foreach ($mem in $currentMembersWith) {
         $rawUser = $allUsersMap[$mid]
         if ($null -eq $rawUser) {
             $reason = "Eliminado del tenant"
-        } else {
+        }
+        else {
             $uEnabled = $rawUser.accountEnabled
             $uUserType = $rawUser.userType
             $uMail = $rawUser.mail
@@ -503,15 +546,20 @@ foreach ($mem in $currentMembersWith) {
             
             if ($OnlyActiveUsers -and $uEnabled -eq $false) {
                 $reason = "Cuenta deshabilitada"
-            } elseif ($ExcludeGuests -and $uUserType -ne "Member") {
+            }
+            elseif ($ExcludeGuests -and ($uUserType -ne "Member" -or $finalUpn -like "*#EXT#*")) {
                 $reason = "Usuario tipo Guest/Invitado"
-            } elseif ($RequireMail -and [string]::IsNullOrEmpty($uMail)) {
+            }
+            elseif ($RequireMail -and [string]::IsNullOrEmpty($uMail)) {
                 $reason = "Sin correo electronico"
-            } elseif (-not [string]::IsNullOrEmpty($AllowedDomain) -and $finalUpn -notlike "*@$AllowedDomain") {
+            }
+            elseif (-not [string]::IsNullOrEmpty($AllowedDomain) -and $finalUpn -notlike "*@$AllowedDomain") {
                 $reason = "Dominio no permitido"
-            } elseif ($isExcludedPattern) {
+            }
+            elseif ($isExcludedPattern) {
                 $reason = "Excluido por palabra clave (admin/test/poc)"
-            } elseif ($EnforceNamingPattern -and -not (Test-UserNamingPattern -UserPrincipalName $finalUpn -DisplayName $finalName)) {
+            }
+            elseif ($EnforceNamingPattern -and $ExceptedNamingPatternEmails -notcontains $finalUpn -and -not (Test-UserNamingPattern -UserPrincipalName $finalUpn -DisplayName $finalName)) {
                 $reason = "No cumple patron de nombre"
             }
         }
@@ -533,7 +581,8 @@ foreach ($mem in $currentMembersWithout) {
         $rawUser = $allUsersMap[$mid]
         if ($null -eq $rawUser) {
             $reason = "Eliminado del tenant"
-        } else {
+        }
+        else {
             $uEnabled = $rawUser.accountEnabled
             $uUserType = $rawUser.userType
             $uMail = $rawUser.mail
@@ -551,15 +600,20 @@ foreach ($mem in $currentMembersWithout) {
             
             if ($OnlyActiveUsers -and $uEnabled -eq $false) {
                 $reason = "Cuenta deshabilitada"
-            } elseif ($ExcludeGuests -and $uUserType -ne "Member") {
+            }
+            elseif ($ExcludeGuests -and ($uUserType -ne "Member" -or $finalUpn -like "*#EXT#*")) {
                 $reason = "Usuario tipo Guest/Invitado"
-            } elseif ($RequireMail -and [string]::IsNullOrEmpty($uMail)) {
+            }
+            elseif ($RequireMail -and [string]::IsNullOrEmpty($uMail)) {
                 $reason = "Sin correo electronico"
-            } elseif (-not [string]::IsNullOrEmpty($AllowedDomain) -and $finalUpn -notlike "*@$AllowedDomain") {
+            }
+            elseif (-not [string]::IsNullOrEmpty($AllowedDomain) -and $finalUpn -notlike "*@$AllowedDomain") {
                 $reason = "Dominio no permitido"
-            } elseif ($isExcludedPattern) {
+            }
+            elseif ($isExcludedPattern) {
                 $reason = "Excluido por palabra clave (admin/test/poc)"
-            } elseif ($EnforceNamingPattern -and -not (Test-UserNamingPattern -UserPrincipalName $finalUpn -DisplayName $finalName)) {
+            }
+            elseif ($EnforceNamingPattern -and $ExceptedNamingPatternEmails -notcontains $finalUpn -and -not (Test-UserNamingPattern -UserPrincipalName $finalUpn -DisplayName $finalName)) {
                 $reason = "No cumple patron de nombre"
             }
         }
@@ -598,10 +652,12 @@ function Add-GroupMember {
         } | ConvertTo-Json
         $res = Invoke-GraphRest -Method POST -Uri "v1.0/groups/$GroupId/members/`$ref" -Body $body
         Write-Output "[+] Adicionado con exito: '$UserUPN' al grupo '$GroupName' (Motivo: $Reason)"
-    } catch {
+    }
+    catch {
         if ($_.Exception.Message -match "One or more added object references already exist") {
             Write-Output "[i] El usuario '$UserUPN' ya es miembro de '$GroupName'"
-        } else {
+        }
+        else {
             Write-Warning "[X] Error al adicionar '$UserUPN' (Motivo: $Reason): $($_.Exception.Message)"
         }
     }
@@ -623,7 +679,8 @@ function Remove-GroupMember {
     try {
         $res = Invoke-GraphRest -Method DELETE -Uri "v1.0/groups/$GroupId/members/$UserId/`$ref"
         Write-Output "[-] Eliminado con exito: '$UserUPN' del grupo '$GroupName' (Motivo: $Reason)"
-    } catch {
+    }
+    catch {
         Write-Warning "[X] Error al eliminar '$UserUPN' (Motivo: $Reason): $($_.Exception.Message)"
     }
 }
