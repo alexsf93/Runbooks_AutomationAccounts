@@ -116,7 +116,14 @@ try {
     $null = Connect-AzAccount -Identity -ErrorAction Stop
     
     Write-Output "Obteniendo Access Token para Microsoft Graph..."
-    $Token = (Get-AzAccessToken -ResourceTypeName MSGraph -ErrorAction Stop).Token
+    $TokenResult = (Get-AzAccessToken -ResourceTypeName MSGraph -ErrorAction Stop).Token
+    
+    if ($TokenResult -is [System.Security.SecureString]) {
+        $Token = ConvertFrom-SecureString -SecureString $TokenResult -AsPlainText
+    }
+    else {
+        $Token = $TokenResult
+    }
     
     $RequestHeaders = @{
         Authorization  = "Bearer $Token"
@@ -650,7 +657,7 @@ function Add-GroupMember {
         $body = @{
             '@odata.id' = "https://graph.microsoft.com/v1.0/directoryObjects/$UserId"
         } | ConvertTo-Json
-        $res = Invoke-GraphRest -Method POST -Uri "v1.0/groups/$GroupId/members/`$ref" -Body $body
+        $null = Invoke-GraphRest -Method POST -Uri "v1.0/groups/$GroupId/members/`$ref" -Body $body
         Write-Output "[+] Adicionado con exito: '$UserUPN' al grupo '$GroupName' (Motivo: $Reason)"
     }
     catch {
@@ -677,7 +684,7 @@ function Remove-GroupMember {
         return
     }
     try {
-        $res = Invoke-GraphRest -Method DELETE -Uri "v1.0/groups/$GroupId/members/$UserId/`$ref"
+        $null = Invoke-GraphRest -Method DELETE -Uri "v1.0/groups/$GroupId/members/$UserId/`$ref"
         Write-Output "[-] Eliminado con exito: '$UserUPN' del grupo '$GroupName' (Motivo: $Reason)"
     }
     catch {

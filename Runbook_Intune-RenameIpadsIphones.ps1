@@ -35,7 +35,14 @@ Import-Module Az.Accounts -ErrorAction Stop
 
 try {
     $null = Connect-AzAccount -Identity -ErrorAction Stop
-    $Token = (Get-AzAccessToken -ResourceTypeName MSGraph -ErrorAction Stop).Token
+    $TokenResult = (Get-AzAccessToken -ResourceTypeName MSGraph -ErrorAction Stop).Token
+    
+    if ($TokenResult -is [System.Security.SecureString]) {
+        $Token = ConvertFrom-SecureString -SecureString $TokenResult -AsPlainText
+    }
+    else {
+        $Token = $TokenResult
+    }
     
     $RequestHeaders = @{
         Authorization  = "Bearer $Token"
