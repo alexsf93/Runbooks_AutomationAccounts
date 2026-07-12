@@ -73,7 +73,7 @@ foreach ($device in $devicesResponse.value) {
             $textMessage = @"
 Good morning $userName,
 We have identified that your corporate device $($device.deviceName) (Serial: $($device.serialNumber)) is currently non-compliant in Intune.
-Last sync: $($device.lastSyncDateTime.ToString("dd/MM/yyyy HH:mm"))
+Last sync: ($([DateTime]$device.lastSyncDateTime).ToString("dd/MM/yyyy HH:mm"))
 Please turn on the device and sync with the company portal.
 "@
             $htmlMessage = @"
@@ -113,7 +113,7 @@ Please turn on the device and sync with the company portal.
         Email    = $userEmail
         OS       = $device.operatingSystem
         Serial   = $device.serialNumber
-        LastSync = $device.lastSyncDateTime.ToString("dd/MM/yyyy HH:mm")
+        LastSync = ([DateTime]$device.lastSyncDateTime).ToString("dd/MM/yyyy HH:mm")
         Notified = $notifiedStatus
     }
 }

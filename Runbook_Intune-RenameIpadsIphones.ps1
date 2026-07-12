@@ -38,7 +38,7 @@ try {
     $TokenResult = (Get-AzAccessToken -ResourceTypeName MSGraph -ErrorAction Stop).Token
     
     if ($TokenResult -is [System.Security.SecureString]) {
-        $Token = ConvertFrom-SecureString -SecureString $TokenResult -AsPlainText
+        $Token = (New-Object System.Management.Automation.PSCredential("Token", $TokenResult)).GetNetworkCredential().Password
     }
     else {
         $Token = $TokenResult
@@ -54,7 +54,7 @@ catch {
     exit 1
 }
 
-$ManagedDevices = [System.Collections.Generic.List[PSCustomObject]]::new()
+$ManagedDevices = [System.Collections.Generic.List[object]]::new()
 $FetchUri = "$($Config.GraphBaseUri)?`$filter=operatingSystem eq 'iOS'&`$top=1000"
 
 while ($FetchUri) {

@@ -119,7 +119,7 @@ try {
     $TokenResult = (Get-AzAccessToken -ResourceTypeName MSGraph -ErrorAction Stop).Token
     
     if ($TokenResult -is [System.Security.SecureString]) {
-        $Token = ConvertFrom-SecureString -SecureString $TokenResult -AsPlainText
+        $Token = (New-Object System.Management.Automation.PSCredential("Token", $TokenResult)).GetNetworkCredential().Password
     }
     else {
         $Token = $TokenResult

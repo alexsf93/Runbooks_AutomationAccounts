@@ -65,7 +65,7 @@ $Date = Get-Date
 $Year = $Date.Year
 $WeekNumber = (Get-Culture).Calendar.GetWeekOfYear($Date, [System.Globalization.CalendarWeekRule]::FirstFourDayWeek, [DayOfWeek]::Monday)
 $ReportName = "SignIns_OutsideSpain_Report_${Year}-W${WeekNumber}.html"
-$ReportPath = ".\$ReportName"
+$ReportPath = Join-Path -Path $env:TEMP -ChildPath $ReportName
 
 # =====================================================================
 # GRAPH API AUTHENTICATION
