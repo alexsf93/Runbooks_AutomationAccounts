@@ -9,6 +9,11 @@
       - "NaxvanCorp - Gente con dispositivo corporativo" (usuarios con al menos 1 dispositivo en Intune)
       - "NaxvanCorp - Gente sin dispositivo corporativo" (usuarios sin ningun dispositivo en Intune)
 
+    NOTA IMPORTANTE: Puesto que la API de Microsoft Graph no admite la creacion directa de grupos de seguridad 
+    habilitados para correo (Mail-Enabled Security Groups), si estos no existen en el tenant, el script intentará 
+    crearlos automáticamente a través de Exchange Online. Para ello, busca los grupos por su nombre y, 
+    si no los encuentra, los creará y sincronizará sus miembros.
+
     El script calcula los cambios necesarios (diferenciales) para optimizar el rendimiento y evitar llamadas API redundantes.
     Por defecto se ejecuta en modo simulacion (Dry Run). Para aplicar los cambios reales, configure el parametro Commit a $true.
 
@@ -30,8 +35,11 @@
 .PARAMETER AllowedDomain
     Dominio permitido para los usuarios. Valor por defecto: "naxvan.es"
 
+.PARAMETER ExchangeOrganization
+    Dominio primario .onmicrosoft.com del tenant para autenticacion contra Exchange Online. Valor por defecto: "asf93.onmicrosoft.com"
+
 .PARAMETER ExcludedUserPatterns
-    Patrones de nombres de usuario a excluir de la evaluacion. Valor por defecto: "admin", "test", "prueba", "poc".
+    Patrones de nombres de usuario a excluir de la evaluacion. Valor por defecto: "admin", "test", "prueba", "poc", "noreply", "no-reply".
 
 .PARAMETER EnforceNamingPattern
     Validar que el UPN cumpla con el patron de nombre de usuario de la organizacion. Valor por defecto: True.
@@ -46,35 +54,65 @@
     Lista de correos de usuarios exceptuados de cumplir con la validacion del patron de nombre.
 
 .REQUIREMENTS
-    - Modulo Az.Accounts instalado en el Automation Account.
-    - Managed Identity con los siguientes permisos de Microsoft Graph (Application):
-        DeviceManagementManagedDevices.Read.All, User.Read.All, Group.ReadWrite.All, GroupMember.ReadWrite.All
+    - Los grupos de seguridad habilitados para correo (Mail-Enabled Security Groups) deben existir previamente en el tenant, o bien la Managed Identity del Automation Account debe tener permisos en Exchange Online para crearlos automáticamente si no existen.
+    - Módulos instalados en el Automation Account:
+        * Az.Accounts
+        * ExchangeOnlineManagement
+    - Managed Identity con los siguientes roles y permisos configurados:
+        
+        1. Permisos de Microsoft Graph (tipo Aplicación / Application permissions):
+           - DeviceManagementManagedDevices.Read.All (Lectura de dispositivos Intune)
+           - User.Read.All (Lectura de usuarios del tenant)
+           - Group.Read.All o Group.ReadWrite.All (Lectura de grupos del tenant)
+           - GroupMember.Read.All o GroupMember.ReadWrite.All (Lectura de miembros de grupos)
+           
+        2. Permisos de Office 365 Exchange Online (tipo Aplicación / Application permissions):
+           - Exchange.ManageAsApp (Permiso para gestionar Exchange como aplicación)
+           
+        3. Rol de Microsoft Entra ID (Exchange Online):
+           - Administrador de Exchange (Exchange Administrator) o Administrador de Destinatarios (Recipient Administrator)
+             asignado a la Managed Identity del Automation Account para permitir la edición de miembros.
 
-    Script PowerShell para asignar estos permisos a la Managed Identity (ejecutar como Administrador de Aplicaciones / Global):
+    Script PowerShell para asignar los permisos a la Managed Identity (Ejecutar en Azure Cloud Shell):
     --------------------------------------------------------------------------------------------------
     # Connect-MgGraph -Scopes "Application.ReadWrite.All", "AppRoleAssignment.ReadWrite.All"
     #
     # $MSIName    = "Nombre-De-Tu-Automation-Account"
-    # $Roles      = @("DeviceManagementManagedDevices.Read.All", "User.Read.All", "Group.ReadWrite.All", "GroupMember.ReadWrite.All")
+    # $MSI        = Get-MgServicePrincipal -Filter "displayName eq '$MSIName'"
+    #
+    # # 1. Asignar permisos de Microsoft Graph
+    # $GraphRoles = @("DeviceManagementManagedDevices.Read.All", "User.Read.All", "Group.Read.All", "GroupMember.Read.All")
     # $GraphAppId = "00000003-0000-0000-c000-000000000000"
+    # $GraphSP    = Get-MgServicePrincipal -Filter "appId eq '$GraphAppId'"
     #
-    # $MSI     = Get-MgServicePrincipal -Filter "displayName eq '$MSIName'"
-    # $GraphSP = Get-MgServicePrincipal -Filter "appId eq '$GraphAppId'"
-    #
-    # foreach ($Role in $Roles) {
+    # foreach ($Role in $GraphRoles) {
     #     $AppRole = $GraphSP.AppRoles | Where-Object { $_.Value -eq $Role -and $_.AllowedMemberTypes -contains "Application" }
     #     if ($AppRole) {
     #         New-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $MSI.Id -PrincipalId $MSI.Id -ResourceId $GraphSP.Id -AppRoleId $AppRole.Id
-    #         Write-Output "Asignado: $Role"
     #     }
     # }
-    --------------------------------------------------------------------------------------------------
+    #
+    # # 2. Asignar permiso de API de Exchange Online (Exchange.ManageAsApp)
+    # $ExchangeAppId = "00000002-0000-0ff1-ce00-000000000000"
+    # $ExchangeSP    = Get-MgServicePrincipal -Filter "appId eq '$ExchangeAppId'"
+    # $ExchangeRole  = "Exchange.ManageAsApp"
+    # $AppRole = $ExchangeSP.AppRoles | Where-Object { $_.Value -eq $ExchangeRole -and $_.AllowedMemberTypes -contains "Application" }
+    # if ($AppRole) {
+    #     New-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $MSI.Id -PrincipalId $MSI.Id -ResourceId $ExchangeSP.Id -AppRoleId $AppRole.Id
+    #     # IMPORTANTE: Despues de ejecutar esto, ve a Entra ID -> Enterprise Applications -> Tu Managed Identity -> Permissions y pulsa "Grant admin consent".
+    # }
+    #
+    # # 3. Registrar Service Principal y asignar Rol de Administración en Exchange Online:
+    # # (Requiere haber iniciado sesión previamente con: Import-Module ExchangeOnlineManagement y Connect-ExchangeOnline)
+    # $sp = Get-AzADServicePrincipal -DisplayName $MSIName
+    # New-ServicePrincipal -AppId $sp.AppId -ServiceId $sp.Id -DisplayName $MSIName
+    # Add-RoleGroupMember -Identity "Organization Management" -Member $sp.Id
 
 .NOTES
     Name: Runbook_EntraID-SyncDeviceGroups.ps1
     Author: Alejandro Suarez (@alexsf93)
-    Version: 3.0.0
-    Date: 2026-07-02
+    Version: 3.1.0
+    Date: 2026-07-14
 #>
 
 param(
@@ -84,42 +122,108 @@ param(
     [bool]$ExcludeGuests = $true,
     [bool]$OnlyActiveUsers = $true,
     [string]$AllowedDomain = "naxvan.es",
-    [string[]]$ExcludedUserPatterns = @("admin", "test", "prueba", "poc"),
+    [string]$ExchangeOrganization = "asf93.onmicrosoft.com",
+    [object]$ExcludedUserPatterns = $null,
     [bool]$EnforceNamingPattern = $true,
     [bool]$RequireMail = $true,
-    [string[]]$ForceWithDeviceEmails = @("alejandro@naxvan.es", "alexsf93@naxvan.es"),
-    [string[]]$ExceptedNamingPatternEmails = @(
-        "Acerrato@naxvan.es",
-        "alejandro@naxvan.es"
-    )
+    [object]$ForceWithDeviceEmails = $null,
+    [object]$ExceptedNamingPatternEmails = $null
 )
 
-$DryRun = -not $Commit
-
-Import-Module Az.Accounts -ErrorAction Stop
-
-Write-Output "========================================================================="
-Write-Output " Sincronizacion de Grupos de Usuarios segun Dispositivos Intune"
-Write-Output "========================================================================="
-if ($DryRun) {
-    Write-Output " MODO: SIMULACION (Dry Run) - No se realizaran cambios en el tenant."
-    Write-Output " Para aplicar los cambios reales, configure el parametro Commit a `$true."
-}
-else {
-    Write-Output " MODO: PRODUCCION (Commit) - Se aplicaran cambios reales en el tenant."
-}
-Write-Output "=========================================================================`n"
-
-# 1. Conectar a Azure y obtener Token de Microsoft Graph
 try {
-    Write-Output "Conectando a Azure con Managed Identity..."
-    $null = Connect-AzAccount -Identity -ErrorAction Stop
+    Write-Verbose "Iniciando el script. Estableciendo arrays por defecto..."
     
-    Write-Output "Obteniendo Access Token para Microsoft Graph..."
+    # Asignar valores por defecto o procesar comas para ExcludedUserPatterns
+    if ($null -eq $ExcludedUserPatterns -or [string]::IsNullOrEmpty($ExcludedUserPatterns)) {
+        $ExcludedUserPatterns = [string[]]@("admin", "test", "prueba", "poc", "noreply", "no-reply")
+    }
+    elseif ($ExcludedUserPatterns -is [string]) {
+        $ExcludedUserPatterns = [string[]]($ExcludedUserPatterns.Split([char[]]',', [System.StringSplitOptions]::RemoveEmptyEntries) | ForEach-Object { $_.Trim() })
+    }
+
+    # Asignar valores por defecto o procesar comas para ForceWithDeviceEmails
+    if ($null -eq $ForceWithDeviceEmails -or [string]::IsNullOrEmpty($ForceWithDeviceEmails)) {
+        $ForceWithDeviceEmails = [string[]]@("alexsf93@naxvan.es")
+    }
+    elseif ($ForceWithDeviceEmails -is [string]) {
+        $ForceWithDeviceEmails = [string[]]($ForceWithDeviceEmails.Split([char[]]',', [System.StringSplitOptions]::RemoveEmptyEntries) | ForEach-Object { $_.Trim() })
+    }
+
+    # Asignar valores por defecto o procesar comas para ExceptedNamingPatternEmails
+    if ($null -eq $ExceptedNamingPatternEmails -or [string]::IsNullOrEmpty($ExceptedNamingPatternEmails)) {
+        $ExceptedNamingPatternEmails = [string[]]@(
+            "alejandro@naxvan.es"
+        )
+    }
+    elseif ($ExceptedNamingPatternEmails -is [string]) {
+        $ExceptedNamingPatternEmails = [string[]]($ExceptedNamingPatternEmails.Split([char[]]',', [System.StringSplitOptions]::RemoveEmptyEntries) | ForEach-Object { $_.Trim() })
+    }
+
+    Write-Verbose "Sanitizando parametros..."
+    if ($AllowedDomain) { 
+        $AllowedDomain = $AllowedDomain.Trim("`"'") 
+        Write-Verbose "AllowedDomain sanitizado: $AllowedDomain"
+    }
+    if ($null -eq $ExchangeOrganization -or [string]::IsNullOrEmpty($ExchangeOrganization)) {
+        $ExchangeOrganization = $AllowedDomain
+    }
+    else {
+        $ExchangeOrganization = $ExchangeOrganization.Trim("`"'")
+    }
+    Write-Verbose "ExchangeOrganization establecido como: $ExchangeOrganization"
+    if ($GroupNameWithDevices) { 
+        $GroupNameWithDevices = $GroupNameWithDevices.Trim("`"'") 
+        Write-Verbose "GroupNameWithDevices sanitizado: $GroupNameWithDevices"
+    }
+    if ($GroupNameWithoutDevices) { 
+        $GroupNameWithoutDevices = $GroupNameWithoutDevices.Trim("`"'") 
+        Write-Verbose "GroupNameWithoutDevices sanitizado: $GroupNameWithoutDevices"
+    }
+    
+    if ($ExcludedUserPatterns) {
+        Write-Verbose "Sanitizando ExcludedUserPatterns..."
+        $ExcludedUserPatterns = [string[]]$ExcludedUserPatterns
+        for ($i = 0; $i -lt $ExcludedUserPatterns.Count; $i++) {
+            if ($ExcludedUserPatterns[$i]) { $ExcludedUserPatterns[$i] = $ExcludedUserPatterns[$i].Trim("`"'") }
+        }
+    }
+    if ($ForceWithDeviceEmails) {
+        Write-Verbose "Sanitizando ForceWithDeviceEmails..."
+        $ForceWithDeviceEmails = [string[]]$ForceWithDeviceEmails
+        for ($i = 0; $i -lt $ForceWithDeviceEmails.Count; $i++) {
+            if ($ForceWithDeviceEmails[$i]) { $ForceWithDeviceEmails[$i] = $ForceWithDeviceEmails[$i].Trim("`"'") }
+        }
+    }
+    if ($ExceptedNamingPatternEmails) {
+        Write-Verbose "Sanitizando ExceptedNamingPatternEmails..."
+        $ExceptedNamingPatternEmails = [string[]]$ExceptedNamingPatternEmails
+        for ($i = 0; $i -lt $ExceptedNamingPatternEmails.Count; $i++) {
+            if ($ExceptedNamingPatternEmails[$i]) { $ExceptedNamingPatternEmails[$i] = $ExceptedNamingPatternEmails[$i].Trim("`"'") }
+        }
+    }
+
+    Write-Output "[+] Conectando a los servicios de Microsoft..."
+    
+    Write-Verbose "Cargando modulo ExchangeOnlineManagement..."
+    Import-Module ExchangeOnlineManagement -ErrorAction Stop
+    Write-Verbose "Modulo ExchangeOnlineManagement cargado con exito."
+
+    Connect-ExchangeOnline -ManagedIdentity -Organization $ExchangeOrganization -ErrorAction Stop
+    Write-Output "    -> Conectado a Exchange Online ($ExchangeOrganization) [OK]"
+
+    Write-Verbose "Cargando modulo Az.Accounts..."
+    Import-Module Az.Accounts -ErrorAction Stop
+    Write-Verbose "Modulo Az.Accounts cargado con exito."
+
+    $null = Connect-AzAccount -Identity -ErrorAction Stop
+    Write-Verbose "Conexion a Azure establecida con exito."
+    
+    Write-Verbose "Obteniendo Access Token para Microsoft Graph..."
     $TokenResult = (Get-AzAccessToken -ResourceTypeName MSGraph -ErrorAction Stop).Token
+    Write-Verbose "Access Token obtenido."
     
     if ($TokenResult -is [System.Security.SecureString]) {
-        $Token = (New-Object System.Management.Automation.PSCredential("Token", $TokenResult)).GetNetworkCredential().Password
+        $Token = [System.Net.NetworkCredential]::new('', $TokenResult).Password
     }
     else {
         $Token = $TokenResult
@@ -129,12 +233,27 @@ try {
         Authorization  = "Bearer $Token"
         "Content-Type" = "application/json; charset=utf-8"
     }
-    Write-Output "Autenticacion completada con exito.`n"
+    Write-Output "    -> Conectado a Microsoft Graph [OK]"
+    Write-Output ""
 }
 catch {
-    Write-Error "Error de autenticacion con Microsoft Graph: $($_.Exception.Message)"
-    exit 1
+    Write-Verbose "Ocurrio un fallo critico en la inicializacion: $($_.Exception.Message)"
+    Write-Error "Fallo critico en la inicializacion o conexion: $($_.Exception.Message)"
+    throw $_
 }
+
+$DryRun = -not $Commit
+
+Write-Output "--------------------------------------------------------------------------------"
+Write-Output " Sincronizacion de Grupos de Usuarios segun Dispositivos Intune"
+Write-Output "--------------------------------------------------------------------------------"
+if ($DryRun) {
+    Write-Output " MODO: SIMULACION (Dry Run) - No se realizaran cambios en el tenant."
+}
+else {
+    Write-Output " MODO: PRODUCCION (Commit) - Se aplicaran cambios reales en el tenant."
+}
+Write-Output "--------------------------------------------------------------------------------`n"
 
 # Wrapper de peticiones REST directas a Microsoft Graph
 function Invoke-GraphRest {
@@ -224,7 +343,7 @@ function Test-UserNamingPattern {
     $normalized = $DisplayName.Normalize([System.Text.NormalizationForm]::FormD)
     $cleanName = ($normalized -replace '\p{Mn}', '') -replace '[^a-zA-Z0-9 ]', ''
     
-    $parts = $cleanName.Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries)
+    $parts = $cleanName.Split([char[]]' ', [System.StringSplitOptions]::RemoveEmptyEntries)
     if ($parts.Count -lt 2) {
         return $false
     }
@@ -258,13 +377,12 @@ function Test-UserNamingPattern {
 }
 
 # Buscar o crear grupo
-function Get-OrCreateGroup {
+function Get-RequiredGroup {
     param(
-        [string]$GroupName,
-        [string]$Description
+        [string]$GroupName
     )
     
-    Write-Host "Buscando el grupo '$GroupName'..."
+    Write-Verbose "Buscando el grupo '$GroupName'..."
     $group = $null
     try {
         $uri = "v1.0/groups?`$filter=displayName eq '$($GroupName -replace "'", "''")'"
@@ -279,11 +397,11 @@ function Get-OrCreateGroup {
 
     if ($group) {
         $typesStr = if ($group.groupTypes) { $group.groupTypes -join ", " } else { "Ninguno" }
-        Write-Host "Grupo '$GroupName' encontrado con ID: $($group.id)"
-        Write-Host "  - Tipo (groupTypes): $typesStr"
-        Write-Host "  - Habilitado para Mail (mailEnabled): $($group.mailEnabled)"
-        Write-Host "  - Seguridad (securityEnabled): $($group.securityEnabled)"
-        Write-Host "  - Sincronizado desde On-Premises (onPremisesSyncEnabled): $($group.onPremisesSyncEnabled)"
+        Write-Verbose "Grupo '$GroupName' encontrado con ID: $($group.id)"
+        Write-Verbose "  - Tipo (groupTypes): $typesStr"
+        Write-Verbose "  - Habilitado para Mail (mailEnabled): $($group.mailEnabled)"
+        Write-Verbose "  - Seguridad (securityEnabled): $($group.securityEnabled)"
+        Write-Verbose "  - Sincronizado desde On-Premises (onPremisesSyncEnabled): $($group.onPremisesSyncEnabled)"
         
         # Validar si es un tipo de grupo soportado
         if ($group.securityEnabled -ne $true -and ($group.groupTypes -notcontains "Unified")) {
@@ -295,49 +413,73 @@ function Get-OrCreateGroup {
         return $group.id
     }
 
+    # Si no existe y estamos en DryRun, simulamos su creacion
     if ($DryRun) {
-        Write-Host "[SIMULACION] El grupo '$GroupName' no existe. Se creara en el modo real."
+        Write-Verbose "[SIMULACION] El grupo '$GroupName' no existe."
         return "SIMULATION_GROUP_ID_$($GroupName -replace '[^a-zA-Z0-9]', '')"
     }
-    else {
-        Write-Host "El grupo '$GroupName' no existe. Creandolo..."
-        $groupParams = @{
-            DisplayName     = $GroupName
-            Description     = $Description
-            MailEnabled     = $false
-            MailNickname    = ($GroupName -replace '[^a-zA-Z0-9]', '')
-            SecurityEnabled = $true
-            GroupTypes      = @()
+
+    # Intentar crearlo en Exchange Online
+    Write-Verbose "El grupo '$GroupName' no existe en el tenant. Intentando crearlo automaticamente en Exchange Online..."
+    try {
+        $alias = $GroupName -replace '[^a-zA-Z0-9]', ''
+        
+        $params = @{
+            Name = $GroupName
+            Alias = $alias
+            Type = 'Security'
+            ErrorAction = 'Stop'
+        }
+        if (-not [string]::IsNullOrEmpty($AllowedDomain)) {
+            $params["PrimarySmtpAddress"] = "$alias@$AllowedDomain"
         }
         
-        try {
-            $body = $groupParams | ConvertTo-Json -Depth 5
-            $newGroupJson = Invoke-GraphRest -Method POST -Uri "v1.0/groups" -Body $body
-            Write-Host "Grupo creado con exito. ID: $($newGroupJson.id)"
-            return $newGroupJson.id
+        $newGroup = New-DistributionGroup @params
+        $groupId = $newGroup.ExternalDirectoryObjectId
+        
+        # Si por algun retraso no se devuelve el ID inmediatamente, lo buscamos en Graph
+        if ([string]::IsNullOrEmpty($groupId)) {
+            Write-Verbose "Esperando replicacion del grupo en Microsoft Graph..."
+            for ($i = 1; $i -le 6; $i++) {
+                Start-Sleep -Seconds 10
+                try {
+                    $uri = "v1.0/groups?`$filter=displayName eq '$($GroupName -replace "'", "''")'"
+                    $res = Invoke-GraphRest -Method GET -Uri $uri
+                    if ($res.value -and $res.value.Count -gt 0) {
+                        $groupId = $res.value[0].id
+                        break
+                    }
+                }
+                catch {}
+            }
         }
-        catch {
-            Write-Error "No se pudo crear el grupo '$GroupName': $($_.Exception.Message)"
-            throw $_
+
+        if ([string]::IsNullOrEmpty($groupId)) {
+            throw "El grupo fue creado pero no se pudo obtener su ID de Microsoft Graph (retraso en la replicacion)."
         }
+
+        Write-Verbose "[+] Grupo '$GroupName' creado con exito con ID: $groupId"
+        return $groupId
+    }
+    catch {
+        throw "Fallo critico: No se pudo crear el grupo '$GroupName' en Exchange Online. Error: $($_.Exception.Message)"
     }
 }
 
-# 2. Obtener o crear los grupos
-$groupWithId = Get-OrCreateGroup -GroupName $GroupNameWithDevices -Description "Usuarios con al menos un dispositivo gestionado en Intune (Sincronizacion Automatica)"
-$groupWithoutId = Get-OrCreateGroup -GroupName $GroupNameWithoutDevices -Description "Usuarios sin ningun dispositivo gestionado en Intune (Sincronizacion Automatica)"
-Write-Output ""
+# 2. Obtener los grupos requeridos
+Write-Output "[+] Buscando grupos de destino..."
+$groupWithId = Get-RequiredGroup -GroupName $GroupNameWithDevices
+$groupWithoutId = Get-RequiredGroup -GroupName $GroupNameWithoutDevices
+Write-Verbose ""
 
 # 3. Obtener dispositivos de Intune
-Write-Output "Obteniendo lista de dispositivos gestionados en Intune..."
+Write-Output "[+] Consultando dispositivos en Microsoft Intune..."
 $devices = @()
 try {
     $devices = Invoke-GraphPaginatedRequest -Uri "v1.0/deviceManagement/managedDevices?`$select=id,userId,userPrincipalName,operatingSystem"
-    Write-Output "Se encontraron $($devices.Count) dispositivos registrados en Intune."
 }
 catch {
-    Write-Error "Fallo critico al leer los dispositivos gestionados en Intune. Abortando."
-    exit 1
+    throw "Fallo critico al leer los dispositivos gestionados en Intune. Error: $($_.Exception.Message)"
 }
 
 # Hash de dispositivos
@@ -348,18 +490,16 @@ foreach ($d in $devices) {
         $userWithDeviceIds[$uid] = $true
     }
 }
-Write-Output "Usuarios unicos con dispositivos gestionados: $($userWithDeviceIds.Count)`n"
+Write-Output "    -> Dispositivos detectados: $($devices.Count) ($($userWithDeviceIds.Count) usuarios unicos)"
 
 # 4. Obtener usuarios del tenant
-Write-Output "Obteniendo lista de usuarios del tenant..."
+Write-Output "[+] Consultando usuarios de Microsoft Entra ID..."
 $allUsersRaw = @()
 try {
     $allUsersRaw = Invoke-GraphPaginatedRequest -Uri "v1.0/users?`$select=id,displayName,userPrincipalName,accountEnabled,userType,mail"
-    Write-Output "Se encontraron $($allUsersRaw.Count) usuarios en el tenant."
 }
 catch {
-    Write-Error "Fallo critico al leer los usuarios del tenant. Abortando."
-    exit 1
+    throw "Fallo critico al leer los usuarios del tenant. Error: $($_.Exception.Message)"
 }
 
 $allUsersMap = @{}
@@ -380,7 +520,7 @@ foreach ($u in $allUsersRaw) {
     
     # Excepcion CEOs
     if ($ForceWithDeviceEmails -contains $upn) {
-        Write-Output "DEBUG: Usuario '$upn' es forzado (CEO). Pasa filtro."
+        Write-Verbose "Usuario '$upn' es forzado (CEO). Pasa filtro."
         $eligibleUsers += $u
         continue
     }
@@ -421,7 +561,7 @@ foreach ($u in $allUsersRaw) {
     }
     if ($keep -and $EnforceNamingPattern) {
         if ($ExceptedNamingPatternEmails -contains $upn) {
-            Write-Output "DEBUG: Usuario '$upn' es excepcion del patron de nombre. Pasa filtro."
+            Write-Verbose "Usuario '$upn' es excepcion del patron de nombre. Pasa filtro."
         }
         elseif (-not (Test-UserNamingPattern -UserPrincipalName $upn -DisplayName $displayName)) {
             $keep = $false
@@ -430,42 +570,42 @@ foreach ($u in $allUsersRaw) {
     }
     
     if (-not $keep) {
-        Write-Output "DEBUG: Usuario '$upn' filtrado debido a:$filterReason"
+        Write-Verbose "Usuario '$upn' filtrado debido a:$filterReason"
     }
     else {
-        Write-Output "DEBUG: Usuario '$upn' pasa el filtro."
+        Write-Verbose "Usuario '$upn' pasa el filtro."
         $eligibleUsers += $u
     }
 }
 $exclusionesStr = if ($ExcludedUserPatterns) { $ExcludedUserPatterns -join ',' } else { "Ninguna" }
-Write-Output "Usuarios elegibles para evaluar tras filtros (Activos=$OnlyActiveUsers, ExcluirInvitados=$ExcludeGuests, Dominio=$AllowedDomain, Exclusiones=$exclusionesStr, ValidarPatronNombre=$EnforceNamingPattern, RequerirEmail=$RequireMail): $($eligibleUsers.Count)`n"
+Write-Output "[+] Evaluando usuarios del tenant..."
+Write-Output "    -> Usuarios elegibles tras filtros: $($eligibleUsers.Count) (de $($allUsersRaw.Count) totales)"
 
 # 5. Obtener miembros actuales de ambos grupos
+Write-Output "[+] Consultando miembros actuales de los grupos..."
 $currentMembersWith = @()
 $currentMembersWithout = @()
 
-if ($groupWithId -notlike "SIMULATION_GROUP_ID_*") {
-    Write-Output "Obteniendo miembros actuales del grupo '$GroupNameWithDevices'..."
+if ($groupWithId -notlike "*SIMULATION_GROUP_ID_*") {
     try {
         $currentMembersWith = Invoke-GraphPaginatedRequest -Uri "v1.0/groups/$groupWithId/members?`$select=id,userPrincipalName,displayName"
-        Write-Output "Miembros actuales en '$GroupNameWithDevices': $($currentMembersWith.Count)"
+        Write-Output "    -> Miembros en '$GroupNameWithDevices': $($currentMembersWith.Count)"
     }
     catch {
         Write-Warning "No se pudo leer la membresia de '$GroupNameWithDevices'."
     }
 }
 
-if ($groupWithoutId -notlike "SIMULATION_GROUP_ID_*") {
-    Write-Output "Obteniendo miembros actuales del grupo '$GroupNameWithoutDevices'..."
+if ($groupWithoutId -notlike "*SIMULATION_GROUP_ID_*") {
     try {
         $currentMembersWithout = Invoke-GraphPaginatedRequest -Uri "v1.0/groups/$groupWithoutId/members?`$select=id,userPrincipalName,displayName"
-        Write-Output "Miembros actuales en '$GroupNameWithoutDevices': $($currentMembersWithout.Count)"
+        Write-Output "    -> Miembros en '$GroupNameWithoutDevices': $($currentMembersWithout.Count)"
     }
     catch {
         Write-Warning "No se pudo leer la membresia de '$GroupNameWithoutDevices'."
     }
 }
-Write-Output ""
+Write-Verbose ""
 
 # Crear tablas hash de miembros actuales para busquedas eficientes O(1)
 $currentMembersWithIds = @{}
@@ -630,15 +770,16 @@ foreach ($mem in $currentMembersWithout) {
 }
 
 # 7. Resumen de acciones
-Write-Output "========================================= RESUMEN DE CAMBIOS ========================================="
-Write-Output "Grupo: '$GroupNameWithDevices'"
-Write-Output "  [+] A adicionar: $($toAddWith.Count)"
-Write-Output "  [-] A eliminar: $($toRemoveWith.Count)"
-Write-Output "Grupo: '$GroupNameWithoutDevices'"
-Write-Output "  [+] A adicionar: $($toAddWithout.Count)"
-Write-Output "  [-] A eliminar: $($toRemoveWithout.Count)"
-Write-Output "======================================================================================================"
-Write-Output ""
+Write-Output "--------------------------------------------------------------------------------"
+Write-Output "                              RESUMEN DE CAMBIOS"
+Write-Output "--------------------------------------------------------------------------------"
+Write-Output " Grupo: '$GroupNameWithDevices'"
+Write-Output "   [+] Miembros a añadir: $($toAddWith.Count)"
+Write-Output "   [-] Miembros a eliminar: $($toRemoveWith.Count)"
+Write-Output " Grupo: '$GroupNameWithoutDevices'"
+Write-Output "   [+] Miembros a añadir: $($toAddWithout.Count)"
+Write-Output "   [-] Miembros a eliminar: $($toRemoveWithout.Count)"
+Write-Output "--------------------------------------------------------------------------------`n"
 
 # Añadir miembro
 function Add-GroupMember {
@@ -650,22 +791,19 @@ function Add-GroupMember {
         [string]$Reason
     )
     if ($DryRun) {
-        Write-Output "[SIMULACION] Adicionaria '$UserUPN' al grupo '$GroupName' (Motivo: $Reason)"
+        Write-Output "    [SIMULACION] Añadir '$UserUPN' ($Reason)"
         return
     }
     try {
-        $body = @{
-            '@odata.id' = "https://graph.microsoft.com/v1.0/directoryObjects/$UserId"
-        } | ConvertTo-Json
-        $null = Invoke-GraphRest -Method POST -Uri "v1.0/groups/$GroupId/members/`$ref" -Body $body
-        Write-Output "[+] Adicionado con exito: '$UserUPN' al grupo '$GroupName' (Motivo: $Reason)"
+        Add-DistributionGroupMember -Identity $GroupName -Member $UserUPN -BypassSecurityGroupManagerCheck -ErrorAction Stop
+        Write-Output "    [+] Añadido: '$UserUPN' ($Reason)"
     }
     catch {
-        if ($_.Exception.Message -match "One or more added object references already exist") {
-            Write-Output "[i] El usuario '$UserUPN' ya es miembro de '$GroupName'"
+        if ($_.Exception.Message -match "already exists" -or $_.Exception.Message -match "ya existe" -or $_.Exception.Message -match "One or more added object references already exist") {
+            Write-Output "    [i] Ya es miembro: '$UserUPN'"
         }
         else {
-            Write-Warning "[X] Error al adicionar '$UserUPN' (Motivo: $Reason): $($_.Exception.Message)"
+            Write-Warning "    [X] Error al añadir '$UserUPN' ($Reason): $($_.Exception.Message)"
         }
     }
 }
@@ -680,21 +818,21 @@ function Remove-GroupMember {
         [string]$Reason
     )
     if ($DryRun) {
-        Write-Output "[SIMULACION] Eliminaria '$UserUPN' del grupo '$GroupName' (Motivo: $Reason)"
+        Write-Output "    [SIMULACION] Eliminar '$UserUPN' ($Reason)"
         return
     }
     try {
-        $null = Invoke-GraphRest -Method DELETE -Uri "v1.0/groups/$GroupId/members/$UserId/`$ref"
-        Write-Output "[-] Eliminado con exito: '$UserUPN' del grupo '$GroupName' (Motivo: $Reason)"
+        Remove-DistributionGroupMember -Identity $GroupName -Member $UserUPN -BypassSecurityGroupManagerCheck -Confirm:$false -ErrorAction Stop
+        Write-Output "    [-] Eliminado: '$UserUPN' ($Reason)"
     }
     catch {
-        Write-Warning "[X] Error al eliminar '$UserUPN' (Motivo: $Reason): $($_.Exception.Message)"
+        Write-Warning "    [X] Error al eliminar '$UserUPN' ($Reason): $($_.Exception.Message)"
     }
 }
 
 # 8. Aplicar cambios
 if ($toAddWith.Count -gt 0 -or $toRemoveWith.Count -gt 0) {
-    Write-Output "Actualizando membresias del grupo '$GroupNameWithDevices'..."
+    Write-Output "[+] Sincronizando miembros en el grupo '$GroupNameWithDevices'..."
     foreach ($u in $toAddWith) {
         Add-GroupMember -GroupId $groupWithId -UserId $u.Id -UserUPN $u.UPN -GroupName $GroupNameWithDevices -Reason $u.Reason
     }
@@ -704,7 +842,7 @@ if ($toAddWith.Count -gt 0 -or $toRemoveWith.Count -gt 0) {
 }
 
 if ($toAddWithout.Count -gt 0 -or $toRemoveWithout.Count -gt 0) {
-    Write-Output "Actualizando membresias del grupo '$GroupNameWithoutDevices'..."
+    Write-Output "[+] Sincronizando miembros en el grupo '$GroupNameWithoutDevices'..."
     foreach ($u in $toAddWithout) {
         Add-GroupMember -GroupId $groupWithoutId -UserId $u.Id -UserUPN $u.UPN -GroupName $GroupNameWithoutDevices -Reason $u.Reason
     }
@@ -713,7 +851,13 @@ if ($toAddWithout.Count -gt 0 -or $toRemoveWithout.Count -gt 0) {
     }
 }
 
-Write-Output "`nSincronizacion finalizada correctamente."
+Write-Output "Sincronizacion finalizada correctamente."
 if ($DryRun) {
-    Write-Output "Recuerda: Los cambios anteriores fueron simulados. Configure el parametro Commit a `$true para aplicarlos."
+    Write-Output "Nota: Los cambios anteriores fueron simulados (Dry Run). Para aplicarlos, configure Commit a `$true."
+}
+
+# Desconexion de Exchange Online si existe conexion activa
+if ($null -ne (Get-ConnectionInformation)) {
+    Write-Verbose "Desconectando de Exchange Online..."
+    Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
 }
