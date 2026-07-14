@@ -9,10 +9,9 @@
       - "NaxvanCorp - Gente con dispositivo corporativo" (usuarios con al menos 1 dispositivo en Intune)
       - "NaxvanCorp - Gente sin dispositivo corporativo" (usuarios sin ningun dispositivo en Intune)
 
-    NOTA IMPORTANTE: Puesto que la API de Microsoft Graph no admite la creacion directa de grupos de seguridad 
-    habilitados para correo (Mail-Enabled Security Groups), si estos no existen en el tenant, el script intentará 
-    crearlos automáticamente a través de Exchange Online. Para ello, busca los grupos por su nombre y, 
-    si no los encuentra, los creará y sincronizará sus miembros.
+    NOTA IMPORTANTE: Los grupos de destino deben ser de tipo Microsoft 365 (Unified Groups) para poder ser gestionados 
+    al 100% mediante Microsoft Graph API sin requerir roles administrativos de Exchange Online. Si los grupos no existen 
+    en el tenant, el script los creará automáticamente en la primera ejecución.
 
     El script calcula los cambios necesarios (diferenciales) para optimizar el rendimiento y evitar llamadas API redundantes.
     Por defecto se ejecuta en modo simulacion (Dry Run). Para aplicar los cambios reales, configure el parametro Commit a $true.
@@ -35,8 +34,6 @@
 .PARAMETER AllowedDomain
     Dominio permitido para los usuarios. Valor por defecto: "naxvan.es"
 
-.PARAMETER ExchangeOrganization
-    Dominio primario .onmicrosoft.com del tenant para autenticacion contra Exchange Online. Valor por defecto: "asf93.onmicrosoft.com"
 
 .PARAMETER ExcludedUserPatterns
     Patrones de nombres de usuario a excluir de la evaluacion. Valor por defecto: "admin", "test", "prueba", "poc", "noreply", "no-reply".
@@ -54,24 +51,15 @@
     Lista de correos de usuarios exceptuados de cumplir con la validacion del patron de nombre.
 
 .REQUIREMENTS
-    - Los grupos de seguridad habilitados para correo (Mail-Enabled Security Groups) deben existir previamente en el tenant, o bien la Managed Identity del Automation Account debe tener permisos en Exchange Online para crearlos automáticamente si no existen.
+    - Los grupos de destino deben ser de tipo Microsoft 365 (Unified Groups) para permitir que la API de Microsoft Graph actualice su membresía sin requerir privilegios de Exchange. El script intentará crearlos automáticamente si no existen en el tenant.
     - Módulos instalados en el Automation Account:
         * Az.Accounts
-        * ExchangeOnlineManagement
-    - Managed Identity con los siguientes roles y permisos configurados:
-        
-        1. Permisos de Microsoft Graph (tipo Aplicación / Application permissions):
-           - DeviceManagementManagedDevices.Read.All (Lectura de dispositivos Intune)
-           - User.Read.All (Lectura de usuarios del tenant)
-           - Group.Read.All o Group.ReadWrite.All (Lectura de grupos del tenant)
-           - GroupMember.Read.All o GroupMember.ReadWrite.All (Lectura de miembros de grupos)
-           
-        2. Permisos de Office 365 Exchange Online (tipo Aplicación / Application permissions):
-           - Exchange.ManageAsApp (Permiso para gestionar Exchange como aplicación)
-           
-        3. Rol de Microsoft Entra ID (Exchange Online):
-           - Administrador de Exchange (Exchange Administrator) o Administrador de Destinatarios (Recipient Administrator)
-             asignado a la Managed Identity del Automation Account para permitir la edición de miembros.
+    - Managed Identity con los siguientes permisos de Microsoft Graph (tipo Aplicación / Application permissions):
+        1. DeviceManagementManagedDevices.Read.All (Lectura de dispositivos Intune)
+        2. User.Read.All (Lectura de usuarios del tenant)
+        3. Group.ReadWrite.All (Creación, lectura y edición de grupos de Microsoft 365 y sus miembros)
+
+    Nota: Al utilizar la API de Microsoft Graph para la gestión de grupos y miembros, no se requiere ningún rol de Microsoft Entra ID (como Administrador de Exchange) ni permisos de Exchange Online (como Exchange.ManageAsApp).
 
     Script PowerShell para asignar los permisos a la Managed Identity (Ejecutar en Azure Cloud Shell):
     --------------------------------------------------------------------------------------------------
@@ -80,8 +68,8 @@
     # $MSIName    = "Nombre-De-Tu-Automation-Account"
     # $MSI        = Get-MgServicePrincipal -Filter "displayName eq '$MSIName'"
     #
-    # # 1. Asignar permisos de Microsoft Graph
-    # $GraphRoles = @("DeviceManagementManagedDevices.Read.All", "User.Read.All", "Group.Read.All", "GroupMember.Read.All")
+    # # Asignar permisos de Microsoft Graph
+    # $GraphRoles = @("DeviceManagementManagedDevices.Read.All", "User.Read.All", "Group.ReadWrite.All")
     # $GraphAppId = "00000003-0000-0000-c000-000000000000"
     # $GraphSP    = Get-MgServicePrincipal -Filter "appId eq '$GraphAppId'"
     #
@@ -91,25 +79,9 @@
     #         New-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $MSI.Id -PrincipalId $MSI.Id -ResourceId $GraphSP.Id -AppRoleId $AppRole.Id
     #     }
     # }
-    #
-    # # 2. Asignar permiso de API de Exchange Online (Exchange.ManageAsApp)
-    # $ExchangeAppId = "00000002-0000-0ff1-ce00-000000000000"
-    # $ExchangeSP    = Get-MgServicePrincipal -Filter "appId eq '$ExchangeAppId'"
-    # $ExchangeRole  = "Exchange.ManageAsApp"
-    # $AppRole = $ExchangeSP.AppRoles | Where-Object { $_.Value -eq $ExchangeRole -and $_.AllowedMemberTypes -contains "Application" }
-    # if ($AppRole) {
-    #     New-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $MSI.Id -PrincipalId $MSI.Id -ResourceId $ExchangeSP.Id -AppRoleId $AppRole.Id
-    #     # IMPORTANTE: Despues de ejecutar esto, ve a Entra ID -> Enterprise Applications -> Tu Managed Identity -> Permissions y pulsa "Grant admin consent".
-    # }
-    #
-    # # 3. Registrar Service Principal y asignar Rol de Administración en Exchange Online:
-    # # (Requiere haber iniciado sesión previamente con: Import-Module ExchangeOnlineManagement y Connect-ExchangeOnline)
-    # $sp = Get-AzADServicePrincipal -DisplayName $MSIName
-    # New-ServicePrincipal -AppId $sp.AppId -ServiceId $sp.Id -DisplayName $MSIName
-    # Add-RoleGroupMember -Identity "Organization Management" -Member $sp.Id
 
 .NOTES
-    Name: Runbook_EntraID-SyncDeviceGroups-MailSecurityEnabled.ps1
+    Name: Runbook_EntraID-SyncDeviceGroups-M365Groups.ps1
     Author: Alejandro Suarez (@alexsf93)
     Version: 3.1.0
     Date: 2026-07-14
@@ -122,7 +94,6 @@ param(
     [bool]$ExcludeGuests = $true,
     [bool]$OnlyActiveUsers = $true,
     [string]$AllowedDomain = "naxvan.es",
-    [string]$ExchangeOrganization = "asf93.onmicrosoft.com",
     [object]$ExcludedUserPatterns = $null,
     [bool]$EnforceNamingPattern = $true,
     [bool]$RequireMail = $true,
@@ -164,13 +135,6 @@ try {
         $AllowedDomain = $AllowedDomain.Trim("`"'") 
         Write-Verbose "AllowedDomain sanitizado: $AllowedDomain"
     }
-    if ($null -eq $ExchangeOrganization -or [string]::IsNullOrEmpty($ExchangeOrganization)) {
-        $ExchangeOrganization = $AllowedDomain
-    }
-    else {
-        $ExchangeOrganization = $ExchangeOrganization.Trim("`"'")
-    }
-    Write-Verbose "ExchangeOrganization establecido como: $ExchangeOrganization"
     if ($GroupNameWithDevices) { 
         $GroupNameWithDevices = $GroupNameWithDevices.Trim("`"'") 
         Write-Verbose "GroupNameWithDevices sanitizado: $GroupNameWithDevices"
@@ -202,19 +166,12 @@ try {
         }
     }
 
-    Write-Output "[+] Conectando a los servicios de Microsoft..."
+    Write-Output "[+] Conectando a Microsoft Graph..."
     
-    Write-Verbose "Cargando modulo ExchangeOnlineManagement..."
-    Import-Module ExchangeOnlineManagement -ErrorAction Stop
-    Write-Verbose "Modulo ExchangeOnlineManagement cargado con exito."
-
-    Connect-ExchangeOnline -ManagedIdentity -Organization $ExchangeOrganization -ErrorAction Stop
-    Write-Output "    -> Conectado a Exchange Online ($ExchangeOrganization) [OK]"
-
     Write-Verbose "Cargando modulo Az.Accounts..."
     Import-Module Az.Accounts -ErrorAction Stop
     Write-Verbose "Modulo Az.Accounts cargado con exito."
-
+    
     $null = Connect-AzAccount -Identity -ErrorAction Stop
     Write-Verbose "Conexion a Azure establecida con exito."
     
@@ -404,8 +361,8 @@ function Get-RequiredGroup {
         Write-Verbose "  - Sincronizado desde On-Premises (onPremisesSyncEnabled): $($group.onPremisesSyncEnabled)"
         
         # Validar si es un tipo de grupo soportado
-        if ($group.securityEnabled -ne $true -and ($group.groupTypes -notcontains "Unified")) {
-            Write-Warning "¡ATENCION! El grupo '$GroupName' no parece ser un grupo de seguridad estándar ni un grupo de Microsoft 365. Las consultas de miembros podrían fallar (404/400)."
+        if ($group.groupTypes -notcontains "Unified") {
+            Write-Warning "¡ATENCION! El grupo '$GroupName' no es de tipo Microsoft 365 (Unified Group). Si es un grupo de seguridad habilitado para correo (Mail-enabled Security Group), la actualización de miembros mediante Graph API fallará con error 400 (Bad Request) debido a restricciones de Microsoft."
         }
         if ($group.onPremisesSyncEnabled -eq $true) {
             Write-Warning "¡ATENCION! El grupo '$GroupName' está sincronizado desde on-premises. Su membresía es de solo lectura en la nube."
@@ -419,50 +376,35 @@ function Get-RequiredGroup {
         return "SIMULATION_GROUP_ID_$($GroupName -replace '[^a-zA-Z0-9]', '')"
     }
 
-    # Intentar crearlo en Exchange Online
-    Write-Verbose "El grupo '$GroupName' no existe en el tenant. Intentando crearlo automaticamente en Exchange Online..."
+    # Intentar crearlo en Microsoft Graph como grupo de Microsoft 365 (Unified)
+    Write-Verbose "El grupo '$GroupName' no existe en el tenant. Intentando crearlo automaticamente en Microsoft Graph como Grupo de Microsoft 365..."
     try {
-        $alias = $GroupName -replace '[^a-zA-Z0-9]', ''
-        
-        $params = @{
-            Name = $GroupName
-            Alias = $alias
-            Type = 'Security'
-            ErrorAction = 'Stop'
-        }
-        if (-not [string]::IsNullOrEmpty($AllowedDomain)) {
-            $params["PrimarySmtpAddress"] = "$alias@$AllowedDomain"
+        # Generar un mailNickname válido a partir del nombre del grupo
+        # Solo caracteres alfanuméricos
+        $mailNickname = ($GroupName -replace '[^a-zA-Z0-9]', '').ToLower()
+        if ($mailNickname.Length -gt 64) {
+            $mailNickname = $mailNickname.Substring(0, 64)
         }
         
-        $newGroup = New-DistributionGroup @params
-        $groupId = $newGroup.ExternalDirectoryObjectId
+        $Body = @{
+            displayName = $GroupName
+            description = "Grupo de sincronizacion de dispositivos Intune ($GroupName)"
+            groupTypes = @("Unified")
+            mailEnabled = $true
+            securityEnabled = $false
+            mailNickname = $mailNickname
+            resourceBehaviorOptions = @("WelcomeEmailDisabled")
+        } | ConvertTo-Json -Compress
         
-        # Si por algun retraso no se devuelve el ID inmediatamente, lo buscamos en Graph
-        if ([string]::IsNullOrEmpty($groupId)) {
-            Write-Verbose "Esperando replicacion del grupo en Microsoft Graph..."
-            for ($i = 1; $i -le 6; $i++) {
-                Start-Sleep -Seconds 10
-                try {
-                    $uri = "v1.0/groups?`$filter=displayName eq '$($GroupName -replace "'", "''")'"
-                    $res = Invoke-GraphRest -Method GET -Uri $uri
-                    if ($res.value -and $res.value.Count -gt 0) {
-                        $groupId = $res.value[0].id
-                        break
-                    }
-                }
-                catch {}
-            }
-        }
-
-        if ([string]::IsNullOrEmpty($groupId)) {
-            throw "El grupo fue creado pero no se pudo obtener su ID de Microsoft Graph (retraso en la replicacion)."
-        }
-
-        Write-Verbose "[+] Grupo '$GroupName' creado con exito con ID: $groupId"
+        $newGroup = Invoke-GraphRest -Method POST -Uri "v1.0/groups" -Body $Body
+        $groupId = $newGroup.id
+        
+        Write-Verbose "[+] Grupo de Microsoft 365 '$GroupName' creado con exito con ID: $groupId. Esperando 15 segundos para la replicacion..."
+        Start-Sleep -Seconds 15
         return $groupId
     }
     catch {
-        throw "Fallo critico: No se pudo crear el grupo '$GroupName' en Exchange Online. Error: $($_.Exception.Message)"
+        throw "Fallo critico: No se pudo crear el grupo de Microsoft 365 '$GroupName' en Microsoft Graph. Error: $($_.Exception.Message)"
     }
 }
 
@@ -795,7 +737,11 @@ function Add-GroupMember {
         return
     }
     try {
-        Add-DistributionGroupMember -Identity $GroupName -Member $UserUPN -BypassSecurityGroupManagerCheck -ErrorAction Stop
+        $Body = @{
+            "@odata.id" = "https://graph.microsoft.com/v1.0/directoryObjects/$UserId"
+        } | ConvertTo-Json
+        
+        $null = Invoke-GraphRest -Method POST -Uri "v1.0/groups/$GroupId/members/`$ref" -Body $Body
         Write-Output "    [+] Añadido: '$UserUPN' ($Reason)"
     }
     catch {
@@ -822,7 +768,7 @@ function Remove-GroupMember {
         return
     }
     try {
-        Remove-DistributionGroupMember -Identity $GroupName -Member $UserUPN -BypassSecurityGroupManagerCheck -Confirm:$false -ErrorAction Stop
+        $null = Invoke-GraphRest -Method DELETE -Uri "v1.0/groups/$GroupId/members/$UserId/`$ref"
         Write-Output "    [-] Eliminado: '$UserUPN' ($Reason)"
     }
     catch {
@@ -856,8 +802,4 @@ if ($DryRun) {
     Write-Output "Nota: Los cambios anteriores fueron simulados (Dry Run). Para aplicarlos, configure Commit a `$true."
 }
 
-# Desconexion de Exchange Online si existe conexion activa
-if ($null -ne (Get-ConnectionInformation)) {
-    Write-Verbose "Desconectando de Exchange Online..."
-    Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
-}
+# Sincronización completada
